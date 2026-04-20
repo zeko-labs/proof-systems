@@ -37,6 +37,8 @@ pub mod precomputed_srs;
 #[cfg(feature = "std")]
 pub mod utils;
 
+pub mod sp1_msm;
+
 // Exposing property based tests for the SRS trait
 #[cfg(feature = "std")]
 pub mod pbt_srs;

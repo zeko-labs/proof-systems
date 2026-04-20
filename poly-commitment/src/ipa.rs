@@ -5,8 +5,6 @@
 //! Zero-Knowledge Arguments for Arithmetic Circuits in the Discrete Log
 //! Setting](https://eprint.iacr.org/2016/263).
 
-#[cfg(target_os = "zkvm")]
-mod sp1_msm;
 #[cfg(not(feature = "std"))]
 use crate::collections::HashMap;
 #[cfg(feature = "std")]
@@ -20,7 +18,7 @@ use crate::{
         PolyComm,
     },
     error::CommitmentError,
-    SRS as SRSTrait,
+    sp1_msm, SRS as SRSTrait,
 };
 #[cfg(feature = "std")]
 use crate::{utils::combine_polys, PolynomialsToCombine};
@@ -475,7 +473,6 @@ impl<G: CommitmentCurve> SRS<G> {
         // (see the comment to the `benchmark_msm_parallel_vesta` MSM benchmark)
         // Conditionnal MSM between Sp1 and Others
         let msm_res = {
-            #[cfg(target_os = "zkvm")]
             {
                 use ark_serialize::CanonicalSerialize;
 
@@ -503,8 +500,8 @@ impl<G: CommitmentCurve> SRS<G> {
                 let sc_bigints: Vec<[u64; 4]> = scalars
                     .iter()
                     .map(|s| {
-                        let bi = s.into_bigint();
-                        bi.0 // [u64; 4] little-endian
+                        let limbs: [u64; 4] = s.into_bigint().as_ref().try_into().unwrap();
+                        limbs
                     })
                     .collect();
 
@@ -532,34 +529,6 @@ impl<G: CommitmentCurve> SRS<G> {
                     let x = G::BaseField::deserialize_uncompressed(&rx[..]).unwrap();
                     let y = G::BaseField::deserialize_uncompressed(&ry[..]).unwrap();
                     G::of_coordinates(x, y).into_group()
-                }
-            }
-
-            #[cfg(not(target_os = "zkvm"))]
-            {
-                #[cfg(feature = "parallel")]
-                {
-                    let chunk_size = points.len() / 2;
-                    points
-                        .into_par_iter()
-                        .chunks(chunk_size)
-                        .zip(scalars.into_par_iter().chunks(chunk_size))
-                        .map(|(bases, coeffs)| {
-                            let coeffs_bigint = coeffs
-                                .into_iter()
-                                .map(ark_ff::PrimeField::into_bigint)
-                                .collect::<Vec<_>>();
-                            G::Group::msm_bigint(&bases, &coeffs_bigint)
-                        })
-                        .reduce(G::Group::zero, |mut l, r| {
-                            l += r;
-                            l
-                        })
-                }
-                #[cfg(not(feature = "parallel"))]
-                {
-                    let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
-                    G::Group::msm_bigint(&points, &scalars_bigint)
                 }
             }
         };

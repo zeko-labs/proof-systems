@@ -1,9 +1,8 @@
 //! SP1-optimized MSM for Pallas using sys_bigint precompile.
 //! Only active when compiled for the SP1 zkVM target.
+#![allow(unsafe_code)]
 
-#![cfg(target_os = "zkvm")]
-
-use crypto_bigint::{Encoding, NonZero, U256, U512};
+use crypto_bigint::{Encoding, NonZero, U256};
 
 // ---------------------------------------------------------------------------
 // Fp — Optimize for SP1

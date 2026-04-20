@@ -15,6 +15,10 @@ ark-ff.workspace = true
 ark-poly.workspace = true
 ark-serialize.workspace = true
 
+bytemuck.workspace = true
+crypto-bigint.workspace = true
+sp1-lib.workspace = true
+
 blake2.workspace = true
 hashbrown.workspace = true
 hex.workspace = true
