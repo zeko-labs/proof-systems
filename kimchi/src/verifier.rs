@@ -1257,12 +1257,10 @@ where
     //~
 
     //~ 1. If there's no proof to verify, the proof validates trivially.
-    if proofs.is_empty() {
+   if proofs.is_empty() {
         return Ok(());
     }
 
-    //~ 1. Ensure that all the proof's verifier index have a URS of the same length. (TODO: do they have to be the same URS though? should we check for that?)
-    // TODO: Account for the different SRS lengths
     let srs = proofs[0].verifier_index.srs();
     for &Context { verifier_index, .. } in proofs {
         if verifier_index.srs().max_poly_size() != srs.max_poly_size() {
@@ -1270,28 +1268,29 @@ where
         }
     }
 
-    //~ 1. Validate each proof separately following the [partial verification](#partial-verification) steps.
+    // ------------------------------------------------------------------
+    // Stage 1 — Partial verification (sponge, challenges, evaluations)
+    // ------------------------------------------------------------------
+    println!("cycle-tracker-start: kimchi_to_batch");
     let mut batch = vec![];
     for context in proofs {
-        let Context {
-            verifier_index,
-            proof,
-            public_input,
-        } = context;
-
-        batch.push(to_batch::<
-            FULL_ROUNDS,
-            G,
-            EFqSponge,
-            EFrSponge,
-            OpeningProof,
-        >(verifier_index, proof, public_input)?);
+        let Context { verifier_index, proof, public_input } = context;
+        batch.push(to_batch::<FULL_ROUNDS, G, EFqSponge, EFrSponge, OpeningProof>(
+            verifier_index, proof, public_input,
+        )?);
     }
+    println!("cycle-tracker-end: kimchi_to_batch");
 
-    //~ 1. Use the [`PolyCom.verify`](#polynomial-commitments) to verify the partially evaluated proofs.
-    if OpeningProof::verify(srs, group_map, &mut batch, &mut thread_rng()) {
+    // ------------------------------------------------------------------
+    // Stage 2 — IPA opening verification (the MSM)
+    // ------------------------------------------------------------------
+    println!("cycle-tracker-start: kimchi_ipa_opening");
+    let result = OpeningProof::verify(srs, group_map, &mut batch, &mut thread_rng());
+    println!("cycle-tracker-end: kimchi_ipa_opening");
+
+    if result {
         Ok(())
     } else {
         Err(VerifyError::OpenProof)
-    }
+}
 }
