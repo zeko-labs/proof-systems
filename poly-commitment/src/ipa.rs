@@ -469,6 +469,7 @@ impl<G: CommitmentCurve> SRS<G> {
             sg_rand_base_i *= &sg_rand_base;
         }
 
+        println!("cycle-tracker-start: sp1_msm_path");
         // Verify the equation in two chunks, which is optimal for our SRS size.
         // (see the comment to the `benchmark_msm_parallel_vesta` MSM benchmark)
         // Conditionnal MSM between Sp1 and Others
@@ -532,6 +533,7 @@ impl<G: CommitmentCurve> SRS<G> {
                 }
             }
         };
+        println!("cycle-tracker-end: sp1_msm_path");
 
         msm_res == G::Group::zero()
     }
