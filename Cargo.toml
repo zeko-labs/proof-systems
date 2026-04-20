@@ -56,6 +56,7 @@ criterion = { version = "0.5", features = [
   "cargo_bench_support",
   "html_reports",
 ] }
+crypto-bigint = { version = "0.5", default-features = false, features = ["extra-sizes"] }
 elf = "0.7.2"
 env_logger = "0.11.6"
 getrandom = { version = "0.2.15", features = ["js"] }
@@ -150,6 +151,7 @@ zeroize = "1"
 
 [patch.crates-io]
 bcs = { git = "https://github.com/o1-labs/bcs", rev = "d9c996b0" }
+crypto-bigint = { git = "https://github.com/sp1-patches/RustCrypto-bigint", tag = "patch-0.5.5-sp1-6.0.0" }
 
 [profile.release]
 lto = true

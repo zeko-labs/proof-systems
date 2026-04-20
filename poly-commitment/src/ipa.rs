@@ -5,6 +5,8 @@
 //! Zero-Knowledge Arguments for Arithmetic Circuits in the Discrete Log
 //! Setting](https://eprint.iacr.org/2016/263).
 
+#[cfg(target_os = "zkvm")]
+mod sp1_msm;
 #[cfg(not(feature = "std"))]
 use crate::collections::HashMap;
 #[cfg(feature = "std")]
@@ -471,30 +473,94 @@ impl<G: CommitmentCurve> SRS<G> {
 
         // Verify the equation in two chunks, which is optimal for our SRS size.
         // (see the comment to the `benchmark_msm_parallel_vesta` MSM benchmark)
+        // Conditionnal MSM between Sp1 and Others
         let msm_res = {
-            #[cfg(feature = "parallel")]
+            #[cfg(target_os = "zkvm")]
             {
-                let chunk_size = points.len() / 2;
-                points
-                    .into_par_iter()
-                    .chunks(chunk_size)
-                    .zip(scalars.into_par_iter().chunks(chunk_size))
-                    .map(|(bases, coeffs)| {
-                        let coeffs_bigint = coeffs
-                            .into_iter()
-                            .map(ark_ff::PrimeField::into_bigint)
-                            .collect::<Vec<_>>();
-                        G::Group::msm_bigint(&bases, &coeffs_bigint)
+                use ark_serialize::CanonicalSerialize;
+
+                let mut pts_x = Vec::with_capacity(points.len());
+                let mut pts_y = Vec::with_capacity(points.len());
+                let mut is_inf = Vec::with_capacity(points.len());
+
+                for p in &points {
+                    if p.is_zero() {
+                        pts_x.push([0u8; 32]);
+                        pts_y.push([0u8; 32]);
+                        is_inf.push(true);
+                    } else {
+                        let (x, y) = p.xy().unwrap();
+                        let mut xb = [0u8; 32];
+                        let mut yb = [0u8; 32];
+                        x.serialize_uncompressed(&mut xb[..]).unwrap();
+                        y.serialize_uncompressed(&mut yb[..]).unwrap();
+                        pts_x.push(xb);
+                        pts_y.push(yb);
+                        is_inf.push(false);
+                    }
+                }
+
+                let sc_bigints: Vec<[u64; 4]> = scalars
+                    .iter()
+                    .map(|s| {
+                        let bi = s.into_bigint();
+                        bi.0 // [u64; 4] little-endian
                     })
-                    .reduce(G::Group::zero, |mut l, r| {
-                        l += r;
-                        l
-                    })
+                    .collect();
+
+                let (filtered_x, filtered_y, filtered_s): (Vec<_>, Vec<_>, Vec<_>) = pts_x
+                    .iter()
+                    .zip(pts_y.iter())
+                    .zip(sc_bigints.iter())
+                    .zip(is_inf.iter())
+                    .filter(|(_, &inf)| !inf)
+                    .map(|(((x, y), s), _)| (*x, *y, *s))
+                    .fold((vec![], vec![], vec![]), |mut acc, (x, y, s)| {
+                        acc.0.push(x);
+                        acc.1.push(y);
+                        acc.2.push(s);
+                        acc
+                    });
+
+                let (rx, ry, is_zero) =
+                    sp1_msm::sp1_pallas_msm(&filtered_x, &filtered_y, &filtered_s);
+
+                if is_zero {
+                    G::Group::zero()
+                } else {
+                    use ark_serialize::CanonicalDeserialize;
+                    let x = G::BaseField::deserialize_uncompressed(&rx[..]).unwrap();
+                    let y = G::BaseField::deserialize_uncompressed(&ry[..]).unwrap();
+                    G::of_coordinates(x, y).into_group()
+                }
             }
-            #[cfg(not(feature = "parallel"))]
+
+            #[cfg(not(target_os = "zkvm"))]
             {
-                let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
-                G::Group::msm_bigint(&points, &scalars_bigint)
+                #[cfg(feature = "parallel")]
+                {
+                    let chunk_size = points.len() / 2;
+                    points
+                        .into_par_iter()
+                        .chunks(chunk_size)
+                        .zip(scalars.into_par_iter().chunks(chunk_size))
+                        .map(|(bases, coeffs)| {
+                            let coeffs_bigint = coeffs
+                                .into_iter()
+                                .map(ark_ff::PrimeField::into_bigint)
+                                .collect::<Vec<_>>();
+                            G::Group::msm_bigint(&bases, &coeffs_bigint)
+                        })
+                        .reduce(G::Group::zero, |mut l, r| {
+                            l += r;
+                            l
+                        })
+                }
+                #[cfg(not(feature = "parallel"))]
+                {
+                    let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
+                    G::Group::msm_bigint(&points, &scalars_bigint)
+                }
             }
         };
 
