@@ -11,6 +11,7 @@ pub mod kzg;
 pub mod lagrange_basis;
 pub mod precomputed_srs;
 pub mod utils;
+pub mod sp1_msm;
 
 // Exposing property based tests for the SRS trait
 pub mod pbt_srs;
