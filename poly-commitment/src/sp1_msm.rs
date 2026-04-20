@@ -51,7 +51,6 @@ impl Fp {
     pub fn mul(self, rhs: Self) -> Self {
         #[cfg(target_os = "zkvm")]
         {
-            println!("SP1 MSM on zkVM: using sys_bigint precompile");
             let lhs: [u64; 4] = bytemuck::cast(self.0.to_le_bytes());
             let rhs_l: [u64; 4] = bytemuck::cast(rhs.0.to_le_bytes());
             let mut result = [0u64; 4];
