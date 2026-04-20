@@ -4,14 +4,9 @@
 //! Setting](https://eprint.iacr.org/2016/263)
 
 use crate::{
-    commitment::{
-        b_poly, b_poly_coefficients, combine_commitments, shift_scalar, squeeze_challenge,
-        squeeze_prechallenge, BatchEvaluationProof, CommitmentCurve, EndoCurve,
-    },
-    error::CommitmentError,
-    hash_map_cache::HashMapCache,
-    utils::combine_polys,
-    BlindedCommitment, PolyComm, PolynomialsToCombine, SRS as SRSTrait,
+    BlindedCommitment, PolyComm, PolynomialsToCombine, SRS as SRSTrait, commitment::{
+        BatchEvaluationProof, CommitmentCurve, EndoCurve, b_poly, b_poly_coefficients, combine_commitments, shift_scalar, squeeze_challenge, squeeze_prechallenge
+    }, error::CommitmentError, hash_map_cache::HashMapCache, sp1_msm, utils::combine_polys
 };
 use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{BigInteger, Field, One, PrimeField, UniformRand, Zero};
@@ -235,25 +230,34 @@ impl<G: CommitmentCurve> SRS<G> {
         // Stage 2 — Final MSM (the expensive part)
         // ------------------------------------------------------------------
         println!("cycle-tracker-start: ipa_final_msm");
-        let chunk_size = points.len() / 2;
-        let msm_res = points
-            .into_par_iter()
-            .chunks(chunk_size)
-            .zip(scalars.into_par_iter().chunks(chunk_size))
-            .map(|(bases, coeffs)| {
-                let coeffs_bigint = coeffs
-                    .into_iter()
-                    .map(|c| c.into_bigint())
-                    .collect::<Vec<_>>();
-                G::Group::msm_bigint(&bases, &coeffs_bigint)
+
+        use ark_serialize::CanonicalSerialize;
+
+        let pairs: Vec<([u8; 32], [u8; 32])> = points
+            .iter()
+            .map(|p| {
+                if p.is_zero() {
+                    return ([0u8; 32], [0u8; 32]);
+                }
+                let (x, y) = p.xy().unwrap();
+                let mut xb = [0u8; 32];
+                let mut yb = [0u8; 32];
+                x.serialize_uncompressed(&mut xb[..]).unwrap();
+                y.serialize_uncompressed(&mut yb[..]).unwrap();
+                (xb, yb)
             })
-            .reduce(G::Group::zero, |mut l, r| {
-                l += r;
-                l
-            });
+            .collect();
+
+        let sc_bigints: Vec<[u64; 4]> = scalars
+            .iter()
+            .map(|s| s.into_bigint().as_ref().try_into().unwrap())
+            .collect();
+
+        let result = sp1_msm::sp1_pallas_msm(&pairs, &sc_bigints);
+          
         println!("cycle-tracker-end: ipa_final_msm");
 
-        msm_res == G::Group::zero()
+        result
     }
 
     /// This function creates a trusted-setup SRS instance for circuits with

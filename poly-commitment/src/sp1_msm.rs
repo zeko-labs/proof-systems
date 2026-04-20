@@ -1,11 +1,11 @@
-//! SP1-optimized MSM for Pallas using sys_bigint precompile.
-//! Only active when compiled for the SP1 zkVM target.
-#![allow(unsafe_code)]
+//! SP1-optimized MSM for Pallas using crypto-bigint + sys_bigint precompile.
+//! Pallas: y² = x³ + 5, BaseField = Fp, ScalarField = Fq
 
-use crypto_bigint::{Encoding, NonZero, U256};
+use crypto_bigint::{Encoding, NonZero, U256, U512};
 
 // ---------------------------------------------------------------------------
-// Fp — Optimize for SP1
+// Fp — Pallas base field (coordonnées des points)
+// Modulus = 28948022309329048855892746252171976963363056481941560715954676764349967630337
 // ---------------------------------------------------------------------------
 const FP_MODULUS: U256 =
     U256::from_be_hex("40000000000000000000000000000000224698fc094cf91b992d30ed00000001");
@@ -15,87 +15,92 @@ const FP_MODULUS_LIMBS: [u64; 4] = [
     0x0000000000000000,
     0x4000000000000000,
 ];
-const FP_NONZERO: NonZero<U256> = NonZero::from_uint(FP_MODULUS);
 
 // ---------------------------------------------------------------------------
-// Fq — Pallas scalar field (Vesta base field)
+// Fq — Pallas scalar field (scalaires du MSM)
+// Modulus = 28948022309329048855892746252171976963363056481941647379679742748393362948097
 // ---------------------------------------------------------------------------
-const FQ_MODULUS: U256 =
-    U256::from_be_hex("40000000000000000000000000000000224698fc0994a8dd8c46eb2100000001");
 const FQ_MODULUS_LIMBS: [u64; 4] = [
     0x8c46eb2100000001,
     0x224698fc0994a8dd,
     0x0000000000000000,
     0x4000000000000000,
 ];
-const FQ_NONZERO: NonZero<U256> = NonZero::from_uint(FQ_MODULUS);
 
 // ---------------------------------------------------------------------------
-// Fp field element
+// Fp field element — coordonnées affines/projectives
 // ---------------------------------------------------------------------------
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Fp(U256);
+pub struct Fp(U256);
 
 impl Fp {
-    const ZERO: Self = Fp(U256::ZERO);
-    const ONE:  Self = Fp(U256::ONE);
+    pub const ZERO: Self = Fp(U256::ZERO);
+    pub const ONE: Self = Fp(U256::ONE);
 
     #[inline(always)]
-    fn add(self, rhs: Self) -> Self {
+    pub fn add(self, rhs: Self) -> Self {
         Fp(self.0.add_mod(&rhs.0, &FP_MODULUS))
     }
 
     #[inline(always)]
-    fn sub(self, rhs: Self) -> Self {
+    pub fn sub(self, rhs: Self) -> Self {
         Fp(self.0.sub_mod(&rhs.0, &FP_MODULUS))
     }
 
     #[inline(always)]
-    fn mul(self, rhs: Self) -> Self {
-        let lhs: [u64; 4] = bytemuck::cast(self.0.to_le_bytes());
-        let rhs: [u64; 4] = bytemuck::cast(rhs.0.to_le_bytes());
-        let mut result = [0u64; 4];
-        unsafe {
-            sp1_lib::sys_bigint(
-                &mut result as *mut [u64; 4],
-                0, // OP_MULMOD
-                &lhs as *const [u64; 4],
-                &rhs as *const [u64; 4],
-                &FP_MODULUS_LIMBS as *const [u64; 4],
-            );
+    pub fn mul(self, rhs: Self) -> Self {
+        #[cfg(target_os = "zkvm")]
+        {
+            let lhs: [u64; 4] = bytemuck::cast(self.0.to_le_bytes());
+            let rhs_l: [u64; 4] = bytemuck::cast(rhs.0.to_le_bytes());
+            let mut result = [0u64; 4];
+            #[allow(unsafe_code)]
+            unsafe {
+                sp1_lib::sys_bigint(
+                    &mut result as *mut [u64; 4],
+                    0,
+                    &lhs as *const [u64; 4],
+                    &rhs_l as *const [u64; 4],
+                    &FP_MODULUS_LIMBS as *const [u64; 4],
+                );
+            }
+            return Fp(U256::from_le_bytes(bytemuck::cast(result)));
         }
-        Fp(U256::from_le_bytes(bytemuck::cast(result)))
+        #[cfg(not(target_os = "zkvm"))]
+        {
+            let (lo, hi) = self.0.mul_wide(&rhs.0);
+            let wide = U512::from((lo, hi));
+            let m512 = U512::from((FP_MODULUS, U256::ZERO));
+            let (_, rem) = wide.div_rem(&NonZero::from_uint(m512));
+            Fp(U256::from_le_bytes(
+                rem.to_le_bytes()[..32].try_into().unwrap(),
+            ))
+        }
     }
 
     #[inline(always)]
-    fn neg(self) -> Self {
-        if self.0 == U256::ZERO { self } else { Fp(FP_MODULUS.wrapping_sub(&self.0)) }
+    pub fn neg(self) -> Self {
+        if self.0 == U256::ZERO {
+            self
+        } else {
+            Fp(FP_MODULUS.wrapping_sub(&self.0))
+        }
     }
 
     #[inline(always)]
-    fn square(self) -> Self { self.mul(self) }
-
-    fn pow(self, mut exp: u64) -> Self {
-        let mut base = self;
-        let mut result = Self::ONE;
-        while exp > 0 {
-            if exp & 1 == 1 { result = result.mul(base); }
-            base = base.square();
-            exp >>= 1;
-        }
-        result
+    pub fn square(self) -> Self {
+        self.mul(self)
     }
 
-    fn inverse(self) -> Option<Self> {
-        if self.0 == U256::ZERO { return None; }
-        // Fermat: a^{p-2}
-        // p - 2 for Fp
-        let exp_bytes = FP_MODULUS.wrapping_sub(&U256::from(2u64));
+    pub fn inverse(self) -> Option<Self> {
+        if self.0 == U256::ZERO {
+            return None;
+        }
+        let exp = FP_MODULUS.wrapping_sub(&U256::from(2u64));
         let mut result = Self::ONE;
         let mut base = self;
-        let bits = 255usize;
-        for i in 0..bits {
-            let byte = exp_bytes.to_le_bytes()[i / 8];
+        for i in 0..256usize {
+            let byte = exp.to_le_bytes()[i / 8];
             if (byte >> (i % 8)) & 1 == 1 {
                 result = result.mul(base);
             }
@@ -104,17 +109,18 @@ impl Fp {
         Some(result)
     }
 
-    fn from_le_bytes(b: [u8; 32]) -> Self {
-        Fp(U256::from_le_bytes(b))
+    pub fn from_le_bytes(b: &[u8; 32]) -> Self {
+        Fp(U256::from_le_bytes(*b))
     }
 
-    fn to_le_bytes(self) -> [u8; 32] {
+    pub fn to_le_bytes(self) -> [u8; 32] {
         self.0.to_le_bytes()
     }
 }
 
 // ---------------------------------------------------------------------------
-// Pallas point in projective coordinates (X:Y:Z)
+// Pallas point en coordonnées projectives (X:Y:Z)
+// Courbe : y² = x³ + 5 sur Fp  (COEFF_A=0, COEFF_B=5)
 // ---------------------------------------------------------------------------
 #[derive(Clone, Copy, Debug)]
 struct PallasPoint {
@@ -125,137 +131,232 @@ struct PallasPoint {
 
 impl PallasPoint {
     const INFINITY: Self = PallasPoint {
-        x: Fp::ONE,
+        x: Fp::ZERO,
         y: Fp::ONE,
         z: Fp::ZERO,
     };
 
+    #[inline]
     fn from_affine(x: Fp, y: Fp) -> Self {
         PallasPoint { x, y, z: Fp::ONE }
     }
 
+    #[inline]
     fn is_zero(&self) -> bool {
         self.z.0 == U256::ZERO
     }
 
-    // Complete addition formula for short Weierstrass y²=x³+5 (Pallas b=5)
+    /// Formule d'addition complète pour y²=x³+b
+    /// Renes, Costello, Rezaeian 2015 — Algorithm 4 (complete, a=0)
+    /// b3 = 3*b = 3*5 = 15
     fn add(self, rhs: Self) -> Self {
-        // Using complete addition from "Complete addition formulas for prime order elliptic curves"
-        // (Renes, Costello, Renes 2015)
-        let b3 = Fp::from_le_bytes({
-            // 3*5 = 15 as field element
-            let mut b = [0u8; 32];
-            b[0] = 15;
-            b
-        });
+        let b3 = Fp(U256::from(15u64)); // 3*b = 3*5 = 15
 
         let (x1, y1, z1) = (self.x, self.y, self.z);
         let (x2, y2, z2) = (rhs.x, rhs.y, rhs.z);
 
+        // Steps 1-3
         let t0 = x1.mul(x2);
         let t1 = y1.mul(y2);
         let t2 = z1.mul(z2);
-        let t3 = x1.add(y1);
-        let t4 = x2.add(y2);
-        let t3 = t3.mul(t4);
-        let t4 = t0.add(t1);
-        let t3 = t3.sub(t4);
-        let t4 = x1.add(z1);
-        let t5 = x2.add(z2);
-        let t4 = t4.mul(t5);
-        let t5 = t0.add(t2);
-        let t4 = t4.sub(t5);
-        let t5 = y1.add(z1);
-        let x3 = y2.add(z2);
-        let t5 = t5.mul(x3);
-        let x3 = t1.add(t2);
-        let t5 = t5.sub(x3);
-        let z3 = b3.mul(t2);
-        let x3 = t4.sub(z3);
-        let z3 = x3.add(x3);
-        let x3 = x3.add(z3);
-        let z3 = t1.sub(x3);
-        let x3 = t1.add(x3);
-        let y3 = b3.mul(t4);
-        let t1 = t2.add(t2);
-        let t2 = t1.add(t2);
-        let y3 = y3.sub(t2);
-        let y3 = y3.sub(t0);
-        let t1 = y3.add(y3);
-        let y3 = t1.add(y3);
-        let t1 = t0.add(t0);
-        let t0 = t1.add(t0);
-        let t0 = t0.sub(t2);
-        let t1 = t4.mul(y3);
-        let t2 = t0.mul(y3);
-        let y3 = x3.mul(z3);
-        let y3 = y3.add(t2);
-        let x3 = t3.mul(x3);
-        let x3 = x3.sub(t1);
-        let z3 = t4.mul(z3);
-        let t1 = t3.mul(t0);
-        let z3 = z3.add(t1);
 
-        PallasPoint { x: x3, y: y3, z: z3 }
+        // Steps 4-8: t3 = X1Y2 + Y1X2
+        let t3 = x1.add(y1).mul(x2.add(y2)).sub(t0.add(t1));
+
+        // Steps 9-13: t4 = X1Z2 + Z1X2
+        let t4 = x1.add(z1).mul(x2.add(z2)).sub(t0.add(t2));
+
+        // Steps 14-18: t5 = Y1Z2 + Z1Y2
+        let t5 = y1.add(z1).mul(y2.add(z2)).sub(t1.add(t2));
+
+        // Steps 19-24 (a=0):
+        let bz = b3.mul(t2); // b3 * Z1Z2
+        let x3 = t1.sub(bz); // t1 - b3*t2  (step 22)
+        let z3 = t1.add(bz); // t1 + b3*t2  (step 23)
+        let y3 = x3.mul(z3); // Y3 = X3*Z3  (step 24)
+
+        // Steps 25-32 (a=0, t2=0):
+        let t1n = t0.add(t0).add(t0); // 3*t0
+        let t4n = b3.mul(t4); // b3 * t4
+
+        // Steps 33-34:
+        let y3 = y3.add(t1n.mul(t4n));
+
+        // Steps 35-37:
+        let t0a = t5.mul(t4n);
+        let x3 = t3.mul(x3).sub(t0a);
+
+        // Steps 38-40:
+        let z3 = t5.mul(z3).add(t3.mul(t1n));
+
+        PallasPoint {
+            x: x3,
+            y: y3,
+            z: z3,
+        }
     }
 
-    fn double(self) -> Self {
-        self.add(self)
-    }
-
-    fn scalar_mul(self, scalar_bytes: &[u64; 4]) -> Self {
+    /// Multiplication scalaire — scalaire en 32 bytes little-endian
+    fn scalar_mul(self, scalar_bytes: &[u8; 32]) -> Self {
         let mut result = Self::INFINITY;
         let mut base = self;
-        for limb in scalar_bytes.iter() {
-            for bit in 0..64 {
-                if (limb >> bit) & 1 == 1 {
+        for byte in scalar_bytes.iter() {
+            for bit in 0..8u32 {
+                if (byte >> bit) & 1 == 1 {
                     result = result.add(base);
                 }
-                base = base.double();
+                base = base.add(base);
             }
         }
         result
     }
+
+    fn to_affine(self) -> Option<(Fp, Fp)> {
+        if self.is_zero() {
+            return None;
+        }
+        let z_inv = self.z.inverse()?;
+        Some((self.x.mul(z_inv), self.y.mul(z_inv)))
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Public MSM function — replaces G::Group::msm_bigint in ipa.rs
+// MSM public
+//
+// points  : coordonnées affines (x_le_bytes, y_le_bytes)
+// scalars : BigInt<4> little-endian [u64; 4] (depuis ark_ff into_bigint())
+//
+// Retourne true si le résultat est le point à l'infini
 // ---------------------------------------------------------------------------
+pub fn sp1_pallas_msm(points: &[([u8; 32], [u8; 32])], scalars: &[[u64; 4]]) -> bool {
+    // Vérifie la cohérence avec ark-ec sur les 3 premiers éléments
+    #[cfg(not(target_os = "zkvm"))]
+    {
+        use ark_ec::AffineRepr;
+        use ark_ec::{CurveGroup, VariableBaseMSM};
+        use ark_ff::BigInt;
+        use ark_serialize::CanonicalDeserialize;
+        use mina_curves::pasta::{Fp as ArkFp, Pallas, ProjectivePallas};
 
-/// Convert ark Pallas affine point to our Fp representation
-fn ark_to_fp(v: &[u8; 32]) -> Fp {
-    Fp::from_le_bytes(*v)
-}
+        if points.len() >= 2 {
+            // Trouve 2 points non-nuls
+            let non_zero: Vec<_> = points
+                .iter()
+                .zip(scalars.iter())
+                .filter(|((px, py), _)| px != &[0u8; 32] || py != &[0u8; 32])
+                .take(2)
+                .collect();
 
-/// SP1-optimized MSM for Pallas
-/// points: affine Pallas points as (x_le, y_le) byte pairs
-/// scalars: scalar field elements as 4x u64 limbs (little-endian)
-pub fn sp1_pallas_msm(
-    points_x: &[[u8; 32]],
-    points_y: &[[u8; 32]],
-    scalars: &[[u64; 4]],
-) -> ([u8; 32], [u8; 32], bool) {
-    assert_eq!(points_x.len(), scalars.len());
+            if non_zero.len() >= 2 {
+                use ark_serialize::CanonicalSerialize;
+
+                let ((px0, py0), sc0) = non_zero[0];
+                let ((px1, py1), sc1) = non_zero[1];
+
+                let p0_x = ArkFp::deserialize_uncompressed(&px0[..]).unwrap();
+                let p0_y = ArkFp::deserialize_uncompressed(&py0[..]).unwrap();
+                let p1_x = ArkFp::deserialize_uncompressed(&px1[..]).unwrap();
+                let p1_y = ArkFp::deserialize_uncompressed(&py1[..]).unwrap();
+
+                let ark_point0 = Pallas::new_unchecked(p0_x, p0_y);
+                let ark_point1 = Pallas::new_unchecked(p1_x, p1_y);
+
+                let ark_s0 = BigInt::<4>(*sc0);
+                let ark_s1 = BigInt::<4>(*sc1);
+
+                let ark_res =
+                    ProjectivePallas::msm_bigint(&[ark_point0, ark_point1], &[ark_s0, ark_s1]);
+                let ark_affine = ark_res.into_affine();
+
+                let p0 = PallasPoint::from_affine(Fp::from_le_bytes(px0), Fp::from_le_bytes(py0));
+                let p1 = PallasPoint::from_affine(Fp::from_le_bytes(px1), Fp::from_le_bytes(py1));
+                let s0_bytes: [u8; 32] = bytemuck::cast(*sc0);
+                let s1_bytes: [u8; 32] = bytemuck::cast(*sc1);
+                let our_sum = p0.scalar_mul(&s0_bytes).add(p1.scalar_mul(&s1_bytes));
+
+                let mut ark_xb = [0u8; 32];
+                ark_affine
+                    .x
+                    .serialize_compressed(&mut ark_xb[..])
+                    .unwrap();
+
+                if let Some((our_x, _)) = our_sum.to_affine() {
+                    eprintln!("our x[..4] = {:?}", &our_x.to_le_bytes()[..4]);
+                    eprintln!("ark x[..4] = {:?}", &ark_xb[..4]);
+                    eprintln!("match: {}", our_x.to_le_bytes() == ark_xb);
+                } else {
+                    eprintln!("our sum = INFINITY, ark is_zero: {}", ark_affine.is_zero());
+                }
+            }
+        }
+    }
+
+    debug_assert_eq!(points.len(), scalars.len());
+
+    // Test point 0 — vérifie que from_affine + add(INFINITY) = lui-même
+    if !points.is_empty() {
+        let p = PallasPoint::from_affine(
+            Fp::from_le_bytes(&points[0].0),
+            Fp::from_le_bytes(&points[0].1),
+        );
+        let p_plus_inf = p.add(PallasPoint::INFINITY);
+
+        // Test doublement : p + p
+        let p2 = p.add(p);
+        if let Some((x2, y2)) = p2.to_affine() {
+            eprintln!("2p.x = {:?}", &x2.to_le_bytes()[..8]);
+            eprintln!("2p.y = {:?}", &y2.to_le_bytes()[..8]);
+        } else {
+            eprintln!("2p = INFINITY (bug!)");
+        }
+    }
+
+    // Test scalaire 1 : 1*P = P
+    if !points.is_empty() {
+        let p = PallasPoint::from_affine(
+            Fp::from_le_bytes(&points[0].0),
+            Fp::from_le_bytes(&points[0].1),
+        );
+        let p_plus_inf = p.add(PallasPoint::INFINITY);
+        eprintln!("p+inf is_zero: {}", p_plus_inf.is_zero());
+        match (p.to_affine(), p_plus_inf.to_affine()) {
+            (Some((ax, _)), Some((bx, _))) => eprintln!("p.x == (p+inf).x : {}", ax == bx),
+            (Some(_), None) => eprintln!("p+inf = INFINITY (bug!)"),
+            _ => eprintln!("p = INFINITY (unexpected)"),
+        }
+
+        // Test 1*P = P
+        let mut one = [0u8; 32];
+        one[0] = 1;
+        let p1 = p.scalar_mul(&one);
+        match (p.to_affine(), p1.to_affine()) {
+            (Some((ax, _)), Some((bx, _))) => eprintln!("1*P == P : {}", ax == bx),
+            _ => eprintln!("1*P or P is INFINITY (bug!)"),
+        }
+
+        // Test 2*P
+        let p2 = p.add(p);
+        match p2.to_affine() {
+            Some((x2, y2)) => eprintln!("2p.x = {:?}", &x2.to_le_bytes()[..4]),
+            None => eprintln!("2p = INFINITY (bug!)"),
+        }
+    }
 
     let mut acc = PallasPoint::INFINITY;
-
-    for ((px, py), sc) in points_x.iter().zip(points_y.iter()).zip(scalars.iter()) {
-        let p = PallasPoint::from_affine(
-            Fp::from_le_bytes(*px),
-            Fp::from_le_bytes(*py),
-        );
-        let contribution = p.scalar_mul(sc);
-        acc = acc.add(contribution);
+    for (i, ((px, py), sc)) in points.iter().zip(scalars.iter()).enumerate() {
+        let scalar_bytes: [u8; 32] = bytemuck::cast(*sc);
+        let p = PallasPoint::from_affine(Fp::from_le_bytes(px), Fp::from_le_bytes(py));
+        let contrib = p.scalar_mul(&scalar_bytes);
+        acc = acc.add(contrib);
+        if i < 3 {
+            if let Some((x, _)) = contrib.to_affine() {
+                eprintln!("contrib[{}].x = {:?}", i, &x.to_le_bytes()[..8]);
+            } else {
+                eprintln!("contrib[{}] = INFINITY", i);
+            }
+        }
     }
 
-    if acc.is_zero() {
-        return ([0u8; 32], [0u8; 32], true);
-    }
-
-    // Convert back to affine: x = X/Z, y = Y/Z
-    let z_inv = acc.z.inverse().unwrap();
-    let x_affine = acc.x.mul(z_inv);
-    let y_affine = acc.y.mul(z_inv);
-
-    (x_affine.to_le_bytes(), y_affine.to_le_bytes(), false)
+    eprintln!("final acc is_zero: {}", acc.is_zero());
+    acc.is_zero()
 }
