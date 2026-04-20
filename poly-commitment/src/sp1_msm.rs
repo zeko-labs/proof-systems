@@ -51,6 +51,7 @@ impl Fp {
     pub fn mul(self, rhs: Self) -> Self {
         #[cfg(target_os = "zkvm")]
         {
+            println!("SP1 MSM on zkVM: using sys_bigint precompile");
             let lhs: [u64; 4] = bytemuck::cast(self.0.to_le_bytes());
             let rhs_l: [u64; 4] = bytemuck::cast(rhs.0.to_le_bytes());
             let mut result = [0u64; 4];
@@ -146,77 +147,93 @@ impl PallasPoint {
         self.z.0 == U256::ZERO
     }
 
-    /// Formule d'addition complète pour y²=x³+b
-    /// Renes, Costello, Rezaeian 2015 — Algorithm 4 (complete, a=0)
-    /// b3 = 3*b = 3*5 = 15
-    fn add(self, rhs: Self) -> Self {
-        let b3 = Fp(U256::from(15u64)); // 3*b = 3*5 = 15
-
-        let (x1, y1, z1) = (self.x, self.y, self.z);
-        let (x2, y2, z2) = (rhs.x, rhs.y, rhs.z);
-
-        // Steps 1-3
-        let t0 = x1.mul(x2);
-        let t1 = y1.mul(y2);
-        let t2 = z1.mul(z2);
-
-        // Steps 4-8: t3 = X1Y2 + Y1X2
-        let t3 = x1.add(y1).mul(x2.add(y2)).sub(t0.add(t1));
-
-        // Steps 9-13: t4 = X1Z2 + Z1X2
-        let t4 = x1.add(z1).mul(x2.add(z2)).sub(t0.add(t2));
-
-        // Steps 14-18: t5 = Y1Z2 + Z1Y2
-        let t5 = y1.add(z1).mul(y2.add(z2)).sub(t1.add(t2));
-
-        // Steps 19-24 (a=0):
-        let bz = b3.mul(t2); // b3 * Z1Z2
-        let x3 = t1.sub(bz); // t1 - b3*t2  (step 22)
-        let z3 = t1.add(bz); // t1 + b3*t2  (step 23)
-        let y3 = x3.mul(z3); // Y3 = X3*Z3  (step 24)
-
-        // Steps 25-32 (a=0, t2=0):
-        let t1n = t0.add(t0).add(t0); // 3*t0
-        let t4n = b3.mul(t4); // b3 * t4
-
-        // Steps 33-34:
-        let y3 = y3.add(t1n.mul(t4n));
-
-        // Steps 35-37:
-        let t0a = t5.mul(t4n);
-        let x3 = t3.mul(x3).sub(t0a);
-
-        // Steps 38-40:
-        let z3 = t5.mul(z3).add(t3.mul(t1n));
-
-        PallasPoint {
-            x: x3,
-            y: y3,
-            z: z3,
+    #[inline]
+    fn double(self) -> Self {
+        if self.is_zero() {
+            return self;
         }
+
+        if self.y == Fp::ZERO {
+            return Self::INFINITY;
+        }
+
+        let two = Fp(U256::from(2u64));
+        let three = Fp(U256::from(3u64));
+
+        // lambda = (3 * x^2) / (2 * y) for y^2 = x^3 + 5
+        let numerator = three.mul(self.x.square());
+        let denominator = two.mul(self.y);
+
+        let Some(den_inv) = denominator.inverse() else {
+            return Self::INFINITY;
+        };
+
+        let lambda = numerator.mul(den_inv);
+        let x3 = lambda.square().sub(self.x).sub(self.x);
+        let y3 = lambda.mul(self.x.sub(x3)).sub(self.y);
+
+        Self::from_affine(x3, y3)
     }
 
-    /// Multiplication scalaire — scalaire en 32 bytes little-endian
+    #[inline]
+    fn add(self, rhs: Self) -> Self {
+        if self.is_zero() {
+            return rhs;
+        }
+        if rhs.is_zero() {
+            return self;
+        }
+
+        // Since we keep points in affine form when z != 0,
+        // we can use the standard affine formulas safely.
+        if self.x == rhs.x {
+            // P + (-P) = O
+            if self.y != rhs.y {
+                return Self::INFINITY;
+            }
+
+            // P + P
+            return self.double();
+        }
+
+        let dx = rhs.x.sub(self.x);
+        let dy = rhs.y.sub(self.y);
+
+        let Some(dx_inv) = dx.inverse() else {
+            return Self::INFINITY;
+        };
+
+        let lambda = dy.mul(dx_inv);
+        let x3 = lambda.square().sub(self.x).sub(rhs.x);
+        let y3 = lambda.mul(self.x.sub(x3)).sub(self.y);
+
+        Self::from_affine(x3, y3)
+    }
+
+    /// Scalar multiplication with a little-endian scalar.
     fn scalar_mul(self, scalar_bytes: &[u8; 32]) -> Self {
         let mut result = Self::INFINITY;
         let mut base = self;
+
         for byte in scalar_bytes.iter() {
             for bit in 0..8u32 {
                 if (byte >> bit) & 1 == 1 {
                     result = result.add(base);
                 }
-                base = base.add(base);
+                base = base.double();
             }
         }
+
         result
     }
 
+    #[inline]
     fn to_affine(self) -> Option<(Fp, Fp)> {
         if self.is_zero() {
-            return None;
+            None
+        } else {
+            Some((self.x, self.y))
         }
-        let z_inv = self.z.inverse()?;
-        Some((self.x.mul(z_inv), self.y.mul(z_inv)))
     }
 }
 
@@ -275,10 +292,7 @@ pub fn sp1_pallas_msm(points: &[([u8; 32], [u8; 32])], scalars: &[[u64; 4]]) -> 
                 let our_sum = p0.scalar_mul(&s0_bytes).add(p1.scalar_mul(&s1_bytes));
 
                 let mut ark_xb = [0u8; 32];
-                ark_affine
-                    .x
-                    .serialize_compressed(&mut ark_xb[..])
-                    .unwrap();
+                ark_affine.x.serialize_compressed(&mut ark_xb[..]).unwrap();
 
                 if let Some((our_x, _)) = our_sum.to_affine() {
                     eprintln!("our x[..4] = {:?}", &our_x.to_le_bytes()[..4]);
