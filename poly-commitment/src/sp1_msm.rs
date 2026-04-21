@@ -389,6 +389,69 @@ fn sp1_curve_msm(
 ) -> bool {
     debug_assert_eq!(points.len(), scalars.len());
     let result = pippenger(points, scalars, m, ml);
+    // Dans sp1_curve_msm, avant return
+    #[cfg(not(target_os = "zkvm"))]
+    {
+        use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
+        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+
+        // Reconstruit les points ark depuis nos bytes
+        type ArkFp = mina_curves::pasta::Fq; // Vesta base field
+        type ArkPoint = mina_curves::pasta::Vesta;
+        type ArkProj = mina_curves::pasta::ProjectiveVesta;
+
+        let ark_bases: Vec<ArkPoint> = points
+            .iter()
+            .map(|(px, py)| {
+                if px == &[0u8; 32] && py == &[0u8; 32] {
+                    return ArkPoint::default();
+                }
+                ArkPoint::new_unchecked(
+                    ArkFp::deserialize_uncompressed(&px[..]).unwrap(),
+                    ArkFp::deserialize_uncompressed(&py[..]).unwrap(),
+                )
+            })
+            .collect();
+
+        let ark_bigints: Vec<_> = scalars.iter().map(|s| ark_ff::BigInt::<4>(*s)).collect();
+
+        let ark_res = ArkProj::msm_bigint(&ark_bases, &ark_bigints).into_affine();
+
+        // Convertit notre résultat Jacobian en affine
+        // x_affine = X / Z²
+        let our_x_affine = if result.is_zero() {
+            None
+        } else {
+            let z2 = result.z.square();
+            let exp = m.wrapping_sub(&U256::from(2u64));
+            let mut r = Fp::one(m, ml);
+            let mut b = z2;
+            for i in 0..256 {
+                let byte = exp.to_le_bytes()[i / 8];
+                if (byte >> (i % 8)) & 1 == 1 {
+                    r = r.mul(b);
+                }
+                b = b.square();
+            }
+            Some(result.x.mul(r).to_le_bytes())
+        };
+
+        let mut ark_xb = [0u8; 32];
+        if !ark_res.is_zero() {
+            ark_res.x.serialize_uncompressed(&mut ark_xb[..]).unwrap();
+        }
+
+        eprintln!(
+            "[pippenger] ark_is_zero={} our_is_zero={}",
+            ark_res.is_zero(),
+            result.is_zero()
+        );
+        if let Some(our_x) = our_x_affine {
+            eprintln!("[pippenger] match={}", our_x == ark_xb);
+            eprintln!("[pippenger] our x[..4]={:?}", &our_x[..4]);
+            eprintln!("[pippenger] ark x[..4]={:?}", &ark_xb[..4]);
+        }
+    }
     result.is_zero()
 }
 
