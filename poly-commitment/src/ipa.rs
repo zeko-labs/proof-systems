@@ -35,59 +35,6 @@ use std::fs::File;
 use std::io::Write;
 use std::{cmp::min, iter::Iterator, ops::AddAssign};
 
-fn fmt_u8_32(x: &[u8; 32]) -> String {
-    let body = x
-        .iter()
-        .map(|b| b.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{}]", body)
-}
-
-fn fmt_u64_4(x: &[u64; 4]) -> String {
-    format!("[{}, {}, {}, {}]", x[0], x[1], x[2], x[3])
-}
-
-fn dump_msm_fixture(label: &str, pairs: &[([u8; 32], [u8; 32])], scalars: &[[u64; 4]]) {
-    eprintln!("================ {} ================", label);
-    eprintln!("let pairs: Vec<([u8; 32], [u8; 32])> = vec![");
-    for (x, y) in pairs {
-        eprintln!("    (({}), ({})),", fmt_u8_32(x), fmt_u8_32(y));
-    }
-    eprintln!("];");
-    eprintln!();
-
-    eprintln!("let scalars: Vec<[u64; 4]> = vec![");
-    for s in scalars {
-        eprintln!("    {},", fmt_u64_4(s));
-    }
-    eprintln!("];");
-    eprintln!("==============================================");
-}
-
-fn dump_msm_fixture_to_file(
-    path: &str,
-    label: &str,
-    pairs: &[([u8; 32], [u8; 32])],
-    scalars: &[[u64; 4]],
-) {
-    let mut file = File::create(path).unwrap();
-
-    writeln!(file, "// {}", label).unwrap();
-    writeln!(file, "let pairs: Vec<([u8; 32], [u8; 32])> = vec![").unwrap();
-    for (x, y) in pairs {
-        writeln!(file, "    (({}), ({})),", fmt_u8_32(x), fmt_u8_32(y)).unwrap();
-    }
-    writeln!(file, "];").unwrap();
-    writeln!(file).unwrap();
-
-    writeln!(file, "let scalars: Vec<[u64; 4]> = vec![").unwrap();
-    for s in scalars {
-        writeln!(file, "    {},", fmt_u64_4(s)).unwrap();
-    }
-    writeln!(file, "];").unwrap();
-}
-
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(bound = "G: CanonicalDeserialize + CanonicalSerialize")]
@@ -315,14 +262,6 @@ impl<G: CommitmentCurve> SRS<G> {
             .map(|s| s.into_bigint().as_ref().try_into().unwrap())
             .collect();
 
-        if std::env::var_os("DUMP_REAL_MSM").is_some() {
-            dump_msm_fixture_to_file(
-                "/tmp/ipa_final_msm_fixture.rs",
-                "ipa_final_msm",
-                &pairs,
-                &sc_bigints,
-            );
-        }
 
         let result = sp1_msm::sp1_vesta_msm(&pairs, &sc_bigints);
         println!("cycle-tracker-end: ipa_final_msm");
