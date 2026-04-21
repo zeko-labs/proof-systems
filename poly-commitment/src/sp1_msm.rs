@@ -84,9 +84,12 @@ impl Fp {
             let mut result = [0u64; 4];
             #[allow(unsafe_code)]
             unsafe {
-                sp1_lib::syscall_uint256_mulmod(
+                sp1_lib::sys_bigint(
                     &mut result as *mut [u64; 4],
+                    0,
+                    &lhs as *const [u64; 4],
                     &rhs_l as *const [u64; 4],
+                    &FP_MODULUS_LIMBS as *const [u64; 4],
                 );
             }
             return Fp::new(U256::from_le_bytes(bytemuck::cast(result)), self.m, self.ml);
