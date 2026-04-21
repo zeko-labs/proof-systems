@@ -236,7 +236,7 @@ impl<G: CommitmentCurve> SRS<G> {
         // ------------------------------------------------------------------
         // Stage 2 — Final MSM using SP1-optimized Vesta MSM
         // ------------------------------------------------------------------
-        println!("cycle-tracker-start: ipa_final_msm");
+        println!("cycle-tracker-start: ipa_pairs");
 
         let pairs: Vec<([u8; 32], [u8; 32])> = points
             .iter()
@@ -262,7 +262,9 @@ impl<G: CommitmentCurve> SRS<G> {
             .map(|s| s.into_bigint().as_ref().try_into().unwrap())
             .collect();
 
+        println!("cycle-tracker-end: ipa_pairs");
 
+        println!("cycle-tracker-start: ipa_final_msm");
         let result = sp1_msm::sp1_pallas_msm(&pairs, &sc_bigints);
         println!("cycle-tracker-end: ipa_final_msm");
         return result;
