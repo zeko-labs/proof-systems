@@ -280,14 +280,11 @@ fn pippenger(
         return Point::infinity(m, ml);
     }
 
-    // Window size: same heuristic as ark-ec
     let c = if n < 32 { 3 } else { ln_without_floats(n) + 2 };
-
     let num_bits = 255usize;
     let num_windows = (num_bits + c - 1) / c;
-    let num_buckets = (1usize << c) - 1;
 
-    // Pre-parse all points — skip zero points
+    // Pre-parse points
     let parsed: Vec<Option<(Fp, Fp)>> = points
         .iter()
         .map(|(px, py)| {
@@ -298,32 +295,49 @@ fn pippenger(
         })
         .collect();
 
+    // Compute wNAF digits for all scalars — same as ark-ec make_digits
+    let digits_count = num_windows;
+    let scalar_digits: Vec<i64> = scalars
+        .iter()
+        .flat_map(|s| make_digits_wnaf(s, c, num_bits))
+        .collect();
+
     let mut window_sums: Vec<Point> = Vec::with_capacity(num_windows);
 
     for w in 0..num_windows {
-        let mut buckets = vec![Point::infinity(m, ml); num_buckets + 1];
+        // wNAF: buckets index [0, 2^c) but digits in [-2^(c-1), 2^(c-1)]
+        // bucket[i] accumulates points with digit = i+1
+        // bucket[i] also handles negatives via subtraction
+        let num_buckets = 1usize << c;
+        let mut buckets = vec![Point::infinity(m, ml); num_buckets];
 
-        for (i, sc) in scalars.iter().enumerate() {
+        for (i, digits) in scalar_digits.chunks(digits_count).enumerate() {
             if parsed[i].is_none() {
                 continue;
             }
-
-            // Extract c-bit window at position w*c
-            let digit = extract_bits(sc, w * c, c);
+            let digit = digits[w];
             if digit == 0 {
                 continue;
             }
 
             let (px, py) = parsed[i].unwrap();
-            buckets[digit] = buckets[digit].add_affine(px, py);
+            let p = Point::from_affine(px, py);
+
+            if digit > 0 {
+                let idx = (digit - 1) as usize;
+                buckets[idx] = buckets[idx].add_affine(px, py);
+            } else {
+                let idx = (-digit - 1) as usize;
+                // subtract = add negated point
+                let neg_p = Point::from_affine(px, py.neg());
+                buckets[idx] = buckets[idx].add_affine(neg_p.x, neg_p.y);
+            }
         }
 
-        // Sum buckets: sum_{i=1}^{2^c-1} i * bucket[i]
-        // = sum_{i=1}^{2^c-1} (sum_{j=i}^{2^c-1} bucket[j])
-        // Uses the running-sum trick: 2*(2^c-1) additions
+        // Running sum trick
         let mut running_sum = Point::infinity(m, ml);
         let mut window_sum = Point::infinity(m, ml);
-        for b in (1..=num_buckets).rev() {
+        for b in (0..num_buckets).rev() {
             running_sum = running_sum.add(buckets[b]);
             window_sum = window_sum.add(running_sum);
         }
@@ -331,21 +345,51 @@ fn pippenger(
         window_sums.push(window_sum);
     }
 
-    // Combine windows: result = sum_w window_w * 2^(w*c)
-    // Traverse from highest to lowest window
+    // Combine windows
     let lowest = window_sums[0];
-    let upper =
-        window_sums[1..]
-            .iter()
-            .rev()
-            .fold(Point::infinity(m, ml), |mut total, window_sum| {
-                total = total.add(*window_sum);
-                for _ in 0..c {
-                    total = total.double();
-                }
-                total
-            });
+    let upper = window_sums[1..]
+        .iter()
+        .rev()
+        .fold(Point::infinity(m, ml), |mut total, ws| {
+            total = total.add(*ws);
+            for _ in 0..c {
+                total = total.double();
+            }
+            total
+        });
     upper.add(lowest)
+}
+
+/// wNAF digits — same algorithm as ark-ec make_digits
+fn make_digits_wnaf(
+    scalar: &[u64; 4],
+    w: usize,
+    num_bits: usize,
+) -> impl Iterator<Item = i64> + '_ {
+    let radix: u64 = 1 << w;
+    let window_mask: u64 = radix - 1;
+    let digits_count = (num_bits + w - 1) / w;
+    let mut carry = 0u64;
+
+    (0..digits_count).map(move |i| {
+        let bit_offset = i * w;
+        let u64_idx = bit_offset / 64;
+        let bit_idx = bit_offset % 64;
+
+        let bit_buf = if bit_idx < 64 - w || u64_idx == scalar.len() - 1 {
+            scalar[u64_idx] >> bit_idx
+        } else {
+            (scalar[u64_idx] >> bit_idx) | (scalar[u64_idx + 1] << (64 - bit_idx))
+        };
+
+        let coef = carry + (bit_buf & window_mask);
+        carry = (coef + radix / 2) >> w;
+        let mut digit = (coef as i64) - (carry << w) as i64;
+        if i == digits_count - 1 {
+            digit += (carry << w) as i64;
+        }
+        digit
+    })
 }
 
 /// Extract `width` bits from a [u64; 4] little-endian scalar starting at bit `start`
