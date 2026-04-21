@@ -4,9 +4,15 @@
 //! Setting](https://eprint.iacr.org/2016/263)
 
 use crate::{
-    BlindedCommitment, PolyComm, PolynomialsToCombine, SRS as SRSTrait, commitment::{
-        BatchEvaluationProof, CommitmentCurve, EndoCurve, b_poly, b_poly_coefficients, combine_commitments, shift_scalar, squeeze_challenge, squeeze_prechallenge
-    }, error::CommitmentError, hash_map_cache::HashMapCache, sp1_msm, utils::combine_polys
+    commitment::{
+        b_poly, b_poly_coefficients, combine_commitments, shift_scalar, squeeze_challenge,
+        squeeze_prechallenge, BatchEvaluationProof, CommitmentCurve, EndoCurve,
+    },
+    error::CommitmentError,
+    hash_map_cache::HashMapCache,
+    sp1_msm,
+    utils::combine_polys,
+    BlindedCommitment, PolyComm, PolynomialsToCombine, SRS as SRSTrait,
 };
 use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{BigInteger, Field, One, PrimeField, UniformRand, Zero};
@@ -226,9 +232,34 @@ impl<G: CommitmentCurve> SRS<G> {
         }
         println!("cycle-tracker-end: ipa_build_vectors");
 
+        let neg_count = scalars
+            .iter()
+            .filter(|s| s.into_bigint().as_ref()[3] >= 0x2000000000000000u64)
+            .count();
+        eprintln!(
+            "[sp1_msm] negative-looking scalars: {}/{}",
+            neg_count,
+            scalars.len()
+        );
+
         // ------------------------------------------------------------------
         // Stage 2 — Final MSM (the expensive part)
         // ------------------------------------------------------------------
+
+        let non_affine = points
+            .iter()
+            .filter(|p| {
+                if p.is_zero() {
+                    return false;
+                }
+                // Pour les points projectifs, z != 1 signifie non-normalisé
+                // Pour les points affines, z est toujours 1
+                // Teste en re-sérialisant : ark affine et projectif ont même serialize_uncompressed
+                false // placeholder
+            })
+            .count();
+        eprintln!("[ipa] points type: {}", std::any::type_name::<G>());
+
         println!("cycle-tracker-start: ipa_final_msm");
 
         use ark_serialize::CanonicalSerialize;
@@ -240,11 +271,19 @@ impl<G: CommitmentCurve> SRS<G> {
                     return ([0u8; 32], [0u8; 32]);
                 }
                 let (x, y) = p.xy().unwrap();
-                let mut xb = [0u8; 32];
-                let mut yb = [0u8; 32];
-                x.serialize_uncompressed(&mut xb[..]).unwrap();
-                y.serialize_uncompressed(&mut yb[..]).unwrap();
-                (xb, yb)
+                let mut xb = vec![0u8; 32];
+                let mut yb = vec![0u8; 32];
+                // Use a growable buffer to avoid WriteZero
+                let mut xbuf = Vec::new();
+                let mut ybuf = Vec::new();
+                x.serialize_uncompressed(&mut xbuf).unwrap();
+                y.serialize_uncompressed(&mut ybuf).unwrap();
+                // Copy into fixed array — truncate or pad to 32 bytes
+                let xlen = xbuf.len().min(32);
+                let ylen = ybuf.len().min(32);
+                xb[..xlen].copy_from_slice(&xbuf[..xlen]);
+                yb[..ylen].copy_from_slice(&ybuf[..ylen]);
+                (xb.try_into().unwrap(), yb.try_into().unwrap())
             })
             .collect();
 
@@ -253,11 +292,81 @@ impl<G: CommitmentCurve> SRS<G> {
             .map(|s| s.into_bigint().as_ref().try_into().unwrap())
             .collect();
 
-        let result = sp1_msm::sp1_pallas_msm(&pairs, &sc_bigints);
-          
+        // Dans ipa.rs, juste avant sp1_pallas_msm
+        #[cfg(not(target_os = "zkvm"))]
+        {
+            use ark_ec::{CurveGroup, VariableBaseMSM};
+            use ark_serialize::CanonicalDeserialize;
+            use mina_curves::pasta::{Fp as ArkFp, Pallas as ArkPallas, ProjectivePallas};
+
+            if let Some(p) = points.iter().find(|p| !p.is_zero()) {
+                let (x, _) = p.xy().unwrap();
+                let mut buf = Vec::new();
+                x.serialize_uncompressed(&mut buf).unwrap();
+                eprintln!("[ipa] coord size = {} bytes", buf.len());
+            }
+
+            // Reconstruit les points ark depuis nos bytes
+            let ark_bases: Vec<ArkPallas> = pairs
+                .iter()
+                .map(|(px, py)| {
+                    if px == &[0u8; 32] && py == &[0u8; 32] {
+                        ArkPallas::default() // point à l'infini
+                    } else {
+                        ArkPallas::new_unchecked(
+                            ArkFp::deserialize_uncompressed(&px[..]).unwrap(),
+                            ArkFp::deserialize_uncompressed(&py[..]).unwrap(),
+                        )
+                    }
+                })
+                .collect();
+
+            let ark_bigints: Vec<_> = sc_bigints.iter().map(|s| ark_ff::BigInt::<4>(*s)).collect();
+
+            let ark_res = ProjectivePallas::msm_bigint(&ark_bases, &ark_bigints).into_affine();
+            let our_res = sp1_msm::sp1_pallas_msm(&pairs, &sc_bigints);
+
+            eprintln!("[ipa] ark is_zero: {}", ark_res.is_zero());
+            eprintln!("[ipa] our is_zero: {}", our_res);
+            eprintln!("[ipa] match: {}", ark_res.is_zero() == our_res);
+        }
+
+        let result = sp1_msm::sp1_vesta_msm(&pairs, &sc_bigints);
+
         println!("cycle-tracker-end: ipa_final_msm");
 
-        result
+        return result;
+
+        // Verify the equation in two chunks, which is optimal for our SRS size.
+        // (see the comment to the `benchmark_msm_parallel_vesta` MSM benchmark)
+        let msm_res = {
+            #[cfg(feature = "parallel")]
+            {
+                let chunk_size = points.len() / 2;
+                points
+                    .into_par_iter()
+                    .chunks(chunk_size)
+                    .zip(scalars.into_par_iter().chunks(chunk_size))
+                    .map(|(bases, coeffs)| {
+                        let coeffs_bigint = coeffs
+                            .into_iter()
+                            .map(ark_ff::PrimeField::into_bigint)
+                            .collect::<Vec<_>>();
+                        G::Group::msm_bigint(&bases, &coeffs_bigint)
+                    })
+                    .reduce(G::Group::zero, |mut l, r| {
+                        l += r;
+                        l
+                    })
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
+                G::Group::msm_bigint(&points, &scalars_bigint)
+            }
+        };
+
+        msm_res == G::Group::zero()
     }
 
     /// This function creates a trusted-setup SRS instance for circuits with
