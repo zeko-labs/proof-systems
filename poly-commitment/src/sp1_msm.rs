@@ -739,7 +739,7 @@ mod tests {
         let ark_scs: Vec<_> = scalars.iter().map(|s| ark_ff::BigInt::<4>(*s)).collect();
         let ark_res = ProjectiveVesta::msm_bigint(&ark_pts, &ark_scs).into_affine();
 
-        let our_res = sp1_vesta_msm(&points, &scalars);
+        let our_res = sp1_pallas_msm(&points, &scalars);
 
         eprintln!("ark_is_zero={} our_is_zero={}", ark_res.is_zero(), our_res);
         assert_eq!(our_res, ark_res.is_zero());

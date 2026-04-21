@@ -245,15 +245,9 @@ impl<G: CommitmentCurve> SRS<G> {
                     return ([0u8; 32], [0u8; 32]);
                 }
                 let (x, y) = p.xy().unwrap();
-                let mut xbuf = Vec::new();
-                let mut ybuf = Vec::new();
-                x.serialize_uncompressed(&mut xbuf).unwrap();
-                y.serialize_uncompressed(&mut ybuf).unwrap();
-                let mut xb = [0u8; 32];
-                let mut yb = [0u8; 32];
-                xb[..xbuf.len().min(32)].copy_from_slice(&xbuf[..xbuf.len().min(32)]);
-                yb[..ybuf.len().min(32)].copy_from_slice(&ybuf[..ybuf.len().min(32)]);
-                (xb, yb)
+                let x_limbs: [u64; 4] = x.into_bigint().as_ref().try_into().unwrap();
+                let y_limbs: [u64; 4] = y.into_bigint().as_ref().try_into().unwrap();
+                (bytemuck::cast(x_limbs), bytemuck::cast(y_limbs))
             })
             .collect();
 
