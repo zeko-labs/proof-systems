@@ -33,6 +33,36 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{cmp::min, iter::Iterator, ops::AddAssign};
 
+fn fmt_u8_32(x: &[u8; 32]) -> String {
+    let body = x
+        .iter()
+        .map(|b| b.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{}]", body)
+}
+
+fn fmt_u64_4(x: &[u64; 4]) -> String {
+    format!("[{}, {}, {}, {}]", x[0], x[1], x[2], x[3])
+}
+
+fn dump_msm_fixture(label: &str, pairs: &[([u8; 32], [u8; 32])], scalars: &[[u64; 4]]) {
+    eprintln!("================ {} ================", label);
+    eprintln!("let pairs: Vec<([u8; 32], [u8; 32])> = vec![");
+    for (x, y) in pairs {
+        eprintln!("    (({}), ({})),", fmt_u8_32(x), fmt_u8_32(y));
+    }
+    eprintln!("];");
+    eprintln!();
+
+    eprintln!("let scalars: Vec<[u64; 4]> = vec![");
+    for s in scalars {
+        eprintln!("    {},", fmt_u64_4(s));
+    }
+    eprintln!("];");
+    eprintln!("==============================================");
+}
+
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(bound = "G: CanonicalDeserialize + CanonicalSerialize")]
@@ -115,35 +145,6 @@ where
 
 /// Additional methods for the SRS structure
 impl<G: CommitmentCurve> SRS<G> {
-    fn fmt_u8_32(x: &[u8; 32]) -> String {
-        let body = x
-            .iter()
-            .map(|b| b.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("[{}]", body)
-    }
-
-    fn fmt_u64_4(x: &[u64; 4]) -> String {
-        format!("[{}, {}, {}, {}]", x[0], x[1], x[2], x[3])
-    }
-
-    fn dump_msm_fixture(label: &str, pairs: &[([u8; 32], [u8; 32])], scalars: &[[u64; 4]]) {
-        eprintln!("================ {} ================", label);
-        eprintln!("let pairs: Vec<([u8; 32], [u8; 32])> = vec![");
-        for (x, y) in pairs {
-            eprintln!("    (({}), ({})),", fmt_u8_32(x), fmt_u8_32(y));
-        }
-        eprintln!("];");
-        eprintln!();
-
-        eprintln!("let scalars: Vec<[u64; 4]> = vec![");
-        for s in scalars {
-            eprintln!("    {},", fmt_u64_4(s));
-        }
-        eprintln!("];");
-        eprintln!("==============================================");
-    }
     /// This function verifies a batch of polynomial commitment opening proofs.
     /// Return `true` if the verification is successful, `false` otherwise.
     /// Additional methods for the SRS structure
