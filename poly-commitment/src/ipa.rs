@@ -292,45 +292,6 @@ impl<G: CommitmentCurve> SRS<G> {
             .map(|s| s.into_bigint().as_ref().try_into().unwrap())
             .collect();
 
-        // Dans ipa.rs, juste avant sp1_pallas_msm
-        #[cfg(not(target_os = "zkvm"))]
-        {
-            use ark_ec::{CurveGroup, VariableBaseMSM};
-            use ark_serialize::CanonicalDeserialize;
-            use mina_curves::pasta::{Fp as ArkFp, Pallas as ArkPallas, ProjectivePallas};
-
-            if let Some(p) = points.iter().find(|p| !p.is_zero()) {
-                let (x, _) = p.xy().unwrap();
-                let mut buf = Vec::new();
-                x.serialize_uncompressed(&mut buf).unwrap();
-                eprintln!("[ipa] coord size = {} bytes", buf.len());
-            }
-
-            // Reconstruit les points ark depuis nos bytes
-            let ark_bases: Vec<ArkPallas> = pairs
-                .iter()
-                .map(|(px, py)| {
-                    if px == &[0u8; 32] && py == &[0u8; 32] {
-                        ArkPallas::default() // point à l'infini
-                    } else {
-                        ArkPallas::new_unchecked(
-                            ArkFp::deserialize_uncompressed(&px[..]).unwrap(),
-                            ArkFp::deserialize_uncompressed(&py[..]).unwrap(),
-                        )
-                    }
-                })
-                .collect();
-
-            let ark_bigints: Vec<_> = sc_bigints.iter().map(|s| ark_ff::BigInt::<4>(*s)).collect();
-
-            let ark_res = ProjectivePallas::msm_bigint(&ark_bases, &ark_bigints).into_affine();
-            let our_res = sp1_msm::sp1_pallas_msm(&pairs, &sc_bigints);
-
-            eprintln!("[ipa] ark is_zero: {}", ark_res.is_zero());
-            eprintln!("[ipa] our is_zero: {}", our_res);
-            eprintln!("[ipa] match: {}", ark_res.is_zero() == our_res);
-        }
-
         let result = sp1_msm::sp1_vesta_msm(&pairs, &sc_bigints);
 
         println!("cycle-tracker-end: ipa_final_msm");
