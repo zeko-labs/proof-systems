@@ -236,41 +236,40 @@ impl<G: CommitmentCurve> SRS<G> {
         // ------------------------------------------------------------------
         println!("cycle-tracker-start: ipa_final_msm");
 
-        let pairs: Vec<([u8; 32], [u8; 32])> = points
-            .iter()
-            .map(|p| {
-                if p.is_zero() {
-                    return ([0u8; 32], [0u8; 32]);
-                }
-                let (x, y) = p.xy().unwrap();
-                let mut xbuf = Vec::new();
-                let mut ybuf = Vec::new();
-                x.serialize_uncompressed(&mut xbuf).unwrap();
-                y.serialize_uncompressed(&mut ybuf).unwrap();
-                let mut xb = [0u8; 32];
-                let mut yb = [0u8; 32];
-                xb[..xbuf.len().min(32)].copy_from_slice(&xbuf[..xbuf.len().min(32)]);
-                yb[..ybuf.len().min(32)].copy_from_slice(&ybuf[..ybuf.len().min(32)]);
-                (xb, yb)
-            })
-            .collect();
+        // let pairs: Vec<([u8; 32], [u8; 32])> = points
+        //     .iter()
+        //     .map(|p| {
+        //         if p.is_zero() {
+        //             return ([0u8; 32], [0u8; 32]);
+        //         }
+        //         let (x, y) = p.xy().unwrap();
+        //         let mut xbuf = Vec::new();
+        //         let mut ybuf = Vec::new();
+        //         x.serialize_uncompressed(&mut xbuf).unwrap();
+        //         y.serialize_uncompressed(&mut ybuf).unwrap();
+        //         let mut xb = [0u8; 32];
+        //         let mut yb = [0u8; 32];
+        //         xb[..xbuf.len().min(32)].copy_from_slice(&xbuf[..xbuf.len().min(32)]);
+        //         yb[..ybuf.len().min(32)].copy_from_slice(&ybuf[..ybuf.len().min(32)]);
+        //         (xb, yb)
+        //     })
+        //     .collect();
 
-        let sc_bigints: Vec<[u64; 4]> = scalars
-            .iter()
-            .map(|s| s.into_bigint().as_ref().try_into().unwrap())
-            .collect();
+        // let sc_bigints: Vec<[u64; 4]> = scalars
+        //     .iter()
+        //     .map(|s| s.into_bigint().as_ref().try_into().unwrap())
+        //     .collect();
 
-        let result = sp1_msm::sp1_vesta_msm(&pairs, &sc_bigints);
+        // let result = sp1_msm::sp1_vesta_msm(&pairs, &sc_bigints);
 
-        println!("cycle-tracker-end: ipa_final_msm");
-
-        return result;
+        // return result;
 
         // Verify the equation in two chunks, which is optimal for our SRS size.
         // (see the comment to the `benchmark_msm_parallel_vesta` MSM benchmark)
         let msm_res = {
             #[cfg(feature = "parallel")]
             {
+                println!("parallel msm");
                 let chunk_size = points.len() / 2;
                 points
                     .into_par_iter()
@@ -290,11 +289,13 @@ impl<G: CommitmentCurve> SRS<G> {
             }
             #[cfg(not(feature = "parallel"))]
             {
+                println!("not parallel msm");
                 let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
                 G::Group::msm_bigint(&points, &scalars_bigint)
             }
         };
 
+        println!("cycle-tracker-end: ipa_final_msm");
         msm_res == G::Group::zero()
     }
 
