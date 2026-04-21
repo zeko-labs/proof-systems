@@ -393,35 +393,6 @@ fn sp1_curve_msm(
     debug_assert_eq!(points.len(), scalars.len());
 
     let result = pippenger(points, scalars, m, ml);
-    {
-        use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
-        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-        use mina_curves::pasta::{Fq as ArkFq, ProjectiveVesta, Vesta};
-
-        let ark_pts: Vec<Vesta> = points
-            .iter()
-            .map(|(px, py)| {
-                if px == &[0u8; 32] && py == &[0u8; 32] {
-                    return Vesta::default();
-                }
-                Vesta::new_unchecked(
-                    ArkFq::deserialize_uncompressed(&px[..]).unwrap(),
-                    ArkFq::deserialize_uncompressed(&py[..]).unwrap(),
-                )
-            })
-            .collect();
-
-        let ark_scs: Vec<_> = scalars.iter().map(|s| ark_ff::BigInt::<4>(*s)).collect();
-        let ark_res = ProjectiveVesta::msm_bigint(&ark_pts, &ark_scs).into_affine();
-
-        eprintln!(
-            "[sp1_msm] n={} ark_is_zero={} our_is_zero={} match={}",
-            points.len(),
-            ark_res.is_zero(),
-            result.is_zero(),
-            ark_res.is_zero() == result.is_zero()
-        );
-    }
 
     result.is_zero()
 }
