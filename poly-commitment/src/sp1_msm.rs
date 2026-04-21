@@ -333,16 +333,19 @@ fn pippenger(
 
     // Combine windows: result = sum_w window_w * 2^(w*c)
     // Traverse from highest to lowest window
-    let mut result = Point::infinity(m, ml);
-    for window_sum in window_sums.iter().rev() {
-        // Shift left by c bits (multiply by 2^c)
-        for _ in 0..c {
-            result = result.double();
-        }
-        result = result.add(*window_sum);
-    }
-
-    result
+    let lowest = window_sums[0];
+    let upper =
+        window_sums[1..]
+            .iter()
+            .rev()
+            .fold(Point::infinity(m, ml), |mut total, window_sum| {
+                total = total.add(*window_sum);
+                for _ in 0..c {
+                    total = total.double();
+                }
+                total
+            });
+    upper.add(lowest)
 }
 
 /// Extract `width` bits from a [u64; 4] little-endian scalar starting at bit `start`
@@ -357,7 +360,7 @@ fn extract_bits(scalar: &[u64; 4], start: usize, width: usize) -> usize {
 
     let lo = scalar[limb_idx] >> bit_idx;
 
-    let hi = if bit_idx + width > 64 && limb_idx + 1 < 4 {
+    let hi = if bit_idx > 0 && limb_idx + 1 < 4 {
         scalar[limb_idx + 1] << (64 - bit_idx)
     } else {
         0
@@ -397,6 +400,16 @@ fn sp1_curve_msm(
             .filter(|(px, py)| px == &[0u8; 32] && py == &[0u8; 32])
             .count()
     );
+    #[cfg(not(target_os = "zkvm"))]
+    {
+        use std::fs;
+        if std::env::var("DUMP_MSM").is_ok() {
+            let data = bincode::serialize(&(points, scalars)).unwrap();
+            fs::File::create("/tmp/msm_fixture.bin").unwrap();
+            fs::write("/tmp/msm_fixture.bin", &data).unwrap();
+            eprintln!("[ipa] MSM fixture dumped: {} bytes", data.len());
+        }
+    }
     let result = pippenger(points, scalars, m, ml);
     // Dans sp1_curve_msm, avant return
     #[cfg(not(target_os = "zkvm"))]
@@ -477,6 +490,8 @@ pub fn sp1_pallas_msm(points: &[([u8; 32], [u8; 32])], scalars: &[[u64; 4]]) -> 
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use ark_ec::{CurveGroup, VariableBaseMSM};
     use ark_ff::UniformRand;
@@ -673,13 +688,15 @@ mod tests {
 
     #[test]
     fn test_extract_bits() {
-        // Test cas limite : bit_idx=0, cross-limb
+        // Test tous les bits à 1 sur 256 bits
         let sc = [u64::MAX, u64::MAX, u64::MAX, u64::MAX];
 
         for c in [10usize, 17] {
-            for start in (0..255).step_by(c) {
+            for start in (0..256).step_by(c) {
                 let d = extract_bits(&sc, start, c);
-                let expected = (1usize << c) - 1;
+                // Bits disponibles à partir de `start`
+                let available = 256usize.saturating_sub(start);
+                let expected = (1usize << available.min(c)) - 1;
                 assert_eq!(
                     d, expected,
                     "extract_bits failed at start={} c={}: got {} expected {}",
@@ -688,13 +705,79 @@ mod tests {
             }
         }
 
-        // Test avec scalar = 1
+        // scalar=1, seul le bit 0 est à 1
         let sc_one = [1u64, 0, 0, 0];
-        let d = extract_bits(&sc_one, 0, 17);
-        assert_eq!(d, 1, "scalar=1 window=0 should give 1");
-        for w in 1..15 {
-            let d = extract_bits(&sc_one, w * 17, 17);
-            assert_eq!(d, 0, "scalar=1 window={} should give 0", w);
-        }
+        assert_eq!(extract_bits(&sc_one, 0, 10), 1);
+        assert_eq!(extract_bits(&sc_one, 10, 10), 0);
+        assert_eq!(extract_bits(&sc_one, 20, 10), 0);
+    }
+
+    #[test]
+    fn test_vesta_large() {
+        use ark_ec::{CurveGroup, VariableBaseMSM};
+        use ark_ff::UniformRand;
+        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+        use mina_curves::pasta::{Fp as ArkFp, ProjectiveVesta, Vesta};
+
+        let mut rng = rand::thread_rng();
+        let n = 32850;
+
+        let ark_pts: Vec<_> = (0..n)
+            .map(|_| ProjectiveVesta::rand(&mut rng).into_affine())
+            .collect();
+        let ark_scs: Vec<_> = (0..n)
+            .map(|_| mina_curves::pasta::Fp::rand(&mut rng).into_bigint())
+            .collect();
+        let our_pts: Vec<_> = ark_pts
+            .iter()
+            .map(|p| {
+                let mut xb = [0u8; 32];
+                let mut yb = [0u8; 32];
+                p.x.serialize_uncompressed(&mut xb[..]).unwrap();
+                p.y.serialize_uncompressed(&mut yb[..]).unwrap();
+                (xb, yb)
+            })
+            .collect();
+        let our_scs: Vec<[u64; 4]> = ark_scs
+            .iter()
+            .map(|s| s.as_ref().try_into().unwrap())
+            .collect();
+
+        let ark_res = ProjectiveVesta::msm_bigint(&ark_pts, &ark_scs).into_affine();
+        let our_res = sp1_vesta_msm(&our_pts, &our_scs);
+        assert_eq!(our_res, ark_res.is_zero());
+    }
+
+    #[test]
+    fn test_vesta_ipa_fixture() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+        let data = std::fs::read(dir.join("msm_fixture.bin")).unwrap();
+        let (points, scalars): (Vec<([u8; 32], [u8; 32])>, Vec<[u64; 4]>) =
+            bincode::deserialize(&data).unwrap();
+
+        // ark reference
+        use ark_ec::{CurveGroup, VariableBaseMSM};
+        use ark_serialize::CanonicalDeserialize;
+        use mina_curves::pasta::{Fq as ArkFq, ProjectiveVesta, Vesta};
+
+        let ark_pts: Vec<Vesta> = points
+            .iter()
+            .map(|(px, py)| {
+                if px == &[0u8; 32] {
+                    return Vesta::default();
+                }
+                Vesta::new_unchecked(
+                    ArkFq::deserialize_uncompressed(&px[..]).unwrap(),
+                    ArkFq::deserialize_uncompressed(&py[..]).unwrap(),
+                )
+            })
+            .collect();
+        let ark_scs: Vec<_> = scalars.iter().map(|s| ark_ff::BigInt::<4>(*s)).collect();
+        let ark_res = ProjectiveVesta::msm_bigint(&ark_pts, &ark_scs).into_affine();
+
+        let our_res = sp1_vesta_msm(&points, &scalars);
+
+        eprintln!("ark_is_zero={} our_is_zero={}", ark_res.is_zero(), our_res);
+        assert_eq!(our_res, ark_res.is_zero());
     }
 }

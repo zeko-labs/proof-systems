@@ -40,6 +40,8 @@ o1-utils.workspace = true
 ocaml = { workspace = true, optional = true }
 ocaml-gen = { workspace = true, optional = true }
 
+bincode = "1.3.3"
+
 [dev-dependencies]
 criterion.workspace = true
 rand_chacha.workspace = true
