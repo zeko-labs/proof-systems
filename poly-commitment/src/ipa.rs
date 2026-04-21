@@ -189,7 +189,6 @@ impl<G: CommitmentCurve> SRS<G> {
             };
 
             let s = b_poly_coefficients(&chal);
-
             let neg_rand_base_i = -rand_base_i;
 
             points.push(opening.sg);
@@ -232,37 +231,10 @@ impl<G: CommitmentCurve> SRS<G> {
         }
         println!("cycle-tracker-end: ipa_build_vectors");
 
-        let neg_count = scalars
-            .iter()
-            .filter(|s| s.into_bigint().as_ref()[3] >= 0x2000000000000000u64)
-            .count();
-        eprintln!(
-            "[sp1_msm] negative-looking scalars: {}/{}",
-            neg_count,
-            scalars.len()
-        );
-
         // ------------------------------------------------------------------
-        // Stage 2 — Final MSM (the expensive part)
+        // Stage 2 — Final MSM using SP1-optimized Vesta MSM
         // ------------------------------------------------------------------
-
-        let non_affine = points
-            .iter()
-            .filter(|p| {
-                if p.is_zero() {
-                    return false;
-                }
-                // Pour les points projectifs, z != 1 signifie non-normalisé
-                // Pour les points affines, z est toujours 1
-                // Teste en re-sérialisant : ark affine et projectif ont même serialize_uncompressed
-                false // placeholder
-            })
-            .count();
-        eprintln!("[ipa] points type: {}", std::any::type_name::<G>());
-
         println!("cycle-tracker-start: ipa_final_msm");
-
-        use ark_serialize::CanonicalSerialize;
 
         let pairs: Vec<([u8; 32], [u8; 32])> = points
             .iter()
@@ -271,19 +243,15 @@ impl<G: CommitmentCurve> SRS<G> {
                     return ([0u8; 32], [0u8; 32]);
                 }
                 let (x, y) = p.xy().unwrap();
-                let mut xb = vec![0u8; 32];
-                let mut yb = vec![0u8; 32];
-                // Use a growable buffer to avoid WriteZero
                 let mut xbuf = Vec::new();
                 let mut ybuf = Vec::new();
                 x.serialize_uncompressed(&mut xbuf).unwrap();
                 y.serialize_uncompressed(&mut ybuf).unwrap();
-                // Copy into fixed array — truncate or pad to 32 bytes
-                let xlen = xbuf.len().min(32);
-                let ylen = ybuf.len().min(32);
-                xb[..xlen].copy_from_slice(&xbuf[..xlen]);
-                yb[..ylen].copy_from_slice(&ybuf[..ylen]);
-                (xb.try_into().unwrap(), yb.try_into().unwrap())
+                let mut xb = [0u8; 32];
+                let mut yb = [0u8; 32];
+                xb[..xbuf.len().min(32)].copy_from_slice(&xbuf[..xbuf.len().min(32)]);
+                yb[..ybuf.len().min(32)].copy_from_slice(&ybuf[..ybuf.len().min(32)]);
+                (xb, yb)
             })
             .collect();
 
