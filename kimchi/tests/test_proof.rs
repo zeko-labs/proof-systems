@@ -1,105 +1,56 @@
-use std::{fs, path::Path, path::PathBuf, sync::Arc};
-
-use ark_serialize::CanonicalDeserialize;
-use kimchi::{
-    circuits::constraints::FeatureFlags,
-    groupmap::GroupMap,
-    linearization::expr_linearization,
-    mina_curves::pasta::{Fp, Fq, Pallas, PallasParameters},
-    proof::ProverProof,
-    verifier_index::VerifierIndex,
-};
-use mina_poseidon::{
-    constants::PlonkSpongeConstantsKimchi,
-    sponge::{DefaultFqSponge, DefaultFrSponge},
-};
-use poly_commitment::{
-    ipa::{endos, OpeningProof, SRS as IPASrs},
-    SRS as SRSTrait,
-};
-
-const FULL_ROUNDS: usize = mina_poseidon::pasta::FULL_ROUNDS;
-
-type SpongeParams = PlonkSpongeConstantsKimchi;
-type EFqSponge = DefaultFqSponge<PallasParameters, SpongeParams, FULL_ROUNDS>;
-type EFrSponge = DefaultFrSponge<Fq, SpongeParams, FULL_ROUNDS>;
-
-type Opening = OpeningProof<Pallas, FULL_ROUNDS>;
-type Srs = IPASrs<Pallas>;
-type Index = VerifierIndex<FULL_ROUNDS, Pallas, Srs>;
-type Proof = ProverProof<Pallas, Opening, FULL_ROUNDS>;
-
-fn restore_verifier_index_runtime_fields(index: &mut Index) {
-    let feature_flags = FeatureFlags {
-        range_check0: index.range_check0_comm.is_some(),
-        range_check1: index.range_check1_comm.is_some(),
-        foreign_field_add: index.foreign_field_add_comm.is_some(),
-        foreign_field_mul: index.foreign_field_mul_comm.is_some(),
-        xor: index.xor_comm.is_some(),
-        rot: index.rot_comm.is_some(),
-        lookup_features: index
-            .lookup_index
-            .as_ref()
-            .map(|li| li.lookup_info.features)
-            .unwrap_or_default(),
-    };
-
-    let (linearization, powers_of_alpha) = expr_linearization(Some(&feature_flags), true);
-    index.linearization = linearization;
-    index.powers_of_alpha = powers_of_alpha;
-}
-
-fn load_verify_fixture(
-    verifier_index_path: &Path,
-    proof_path: &Path,
-    srs: Arc<Srs>,
-    endo_q: Fq,
-) -> (Index, Proof, Vec<Fq>) {
-    let mut verifier_index = Index::from_file(srs, verifier_index_path, None, endo_q)
-        .expect("failed to load verifier index");
-
-    restore_verifier_index_runtime_fields(&mut verifier_index);
-
-    let bytes = fs::read(proof_path).expect("failed to read proof payload");
-
-    let (proof, public_input_bytes): (Proof, Vec<[u8; 32]>) =
-        rmp_serde::from_slice(&bytes).expect("failed to deserialize proof payload");
-
-    let public_input = public_input_bytes
-        .into_iter()
-        .map(|buf| Fq::deserialize_uncompressed(&buf[..]).expect("failed to deserialize Fq"))
-        .collect();
-
-    (verifier_index, proof, public_input)
-}
-
 #[test]
 fn kimchi_proof() {
-    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    use ark_serialize::CanonicalDeserialize;
+    use kimchi::{groupmap::GroupMap, verifier::verify, verifier_index::VerifierIndex};
+    use mina_curves::pasta::{Fp, Fq, Pallas};
+    use mina_poseidon::sponge::{DefaultFqSponge, DefaultFrSponge};
+    use poly_commitment::ipa::{OpeningProof, SRS};
+    use std::{fs, path::PathBuf, sync::Arc};
 
-    let verifier_index_path = tests_dir.join("kimchi_verify_index.bin");
-    let proof_path = tests_dir.join("kimchi_verify_proof.bin");
+    type SpongeParams = mina_poseidon::constants::PlonkSpongeConstantsKimchi;
+    type EFqSponge = DefaultFqSponge<mina_curves::pasta::PallasParameters, SpongeParams, 55>;
+    type EFrSponge = DefaultFrSponge<Fq, SpongeParams, 55>;
 
-    println!(
-        "Loading proof and verifier index from fixtures in {}",
-        tests_dir.display()
-    );
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
 
-    let srs = Arc::new(Srs::create(1 << 15));
-    let endo_q = endos::<Pallas>().1;
+    // Load SRS — sérialisé comme (g_bytes, h_bytes) via bincode
+    let srs_bytes = fs::read(dir.join("srs.bin")).expect("missing srs.bin");
+    let (g_bytes, h_bytes): (Vec<u8>, Vec<u8>) = bincode::deserialize(&srs_bytes).unwrap();
+    let g: Vec<Pallas> = CanonicalDeserialize::deserialize_uncompressed(&g_bytes[..]).unwrap();
+    let h: Pallas = CanonicalDeserialize::deserialize_uncompressed(&h_bytes[..]).unwrap();
+    let mut srs = SRS::<Pallas>::default();
+    srs.g = g;
+    srs.h = h;
+    let srs = Arc::new(srs);
 
-    let (verifier_index, proof, public_input) =
-        load_verify_fixture(&verifier_index_path, &proof_path, srs, endo_q);
+    // Load verifier index
+    let vi_path = dir.join("verifier_index.bin");
+    let (_endo_q, endo_r) = poly_commitment::ipa::endos::<Pallas>();
+
+    let mut vi: VerifierIndex<55, Pallas, SRS<Pallas>> =
+        VerifierIndex::from_file(srs.clone(), &vi_path, None, endo_r).unwrap();
+    vi.srs = srs;
+
+    // Load proof + public inputs — sérialisés via rmp_serde
+    let proof_bytes = fs::read(dir.join("proof.bin")).unwrap();
+    let (proof, pi_bytes): (
+        kimchi::proof::ProverProof<Pallas, OpeningProof<Pallas, 55>, 55>,
+        Vec<[u8; 32]>,
+    ) = rmp_serde::from_slice(&proof_bytes).unwrap();
+
+    let public_inputs: Vec<Fq> = pi_bytes
+        .iter()
+        .map(|b| Fq::deserialize_uncompressed(&b[..]).unwrap())
+        .collect();
 
     let group_map = GroupMap::<Fp>::setup();
 
-    let res = kimchi::verifier::verify::<
-        FULL_ROUNDS,
-        Pallas,
-        EFqSponge,
-        EFrSponge,
-        Opening,
-    >(&group_map, &verifier_index, &proof, &public_input);
+    let result = verify::<55, Pallas, EFqSponge, EFrSponge, OpeningProof<Pallas, 55>>(
+        &group_map,
+        &vi,
+        &proof,
+        &public_inputs,
+    );
 
-    assert!(res.is_ok(), "verify failed: {:?}", res);
+    assert!(result.is_ok(), "verify failed: {:?}", result);
 }

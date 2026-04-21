@@ -2284,6 +2284,7 @@ dependencies = [
  "ark-ff 0.5.0",
  "ark-poly",
  "ark-serialize 0.5.0",
+ "bincode",
  "blake2",
  "criterion",
  "groupmap",
