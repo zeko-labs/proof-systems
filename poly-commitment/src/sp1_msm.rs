@@ -391,89 +391,38 @@ fn sp1_curve_msm(
     ml: [u64; 4],
 ) -> bool {
     debug_assert_eq!(points.len(), scalars.len());
-    eprintln!(
-        "[pippenger] n={} zeros_sc={} zeros_pt={}",
-        points.len(),
-        scalars.iter().filter(|s| *s == &[0u64; 4]).count(),
-        points
-            .iter()
-            .filter(|(px, py)| px == &[0u8; 32] && py == &[0u8; 32])
-            .count()
-    );
-    #[cfg(not(target_os = "zkvm"))]
-    {
-        use std::fs;
-        if std::env::var("DUMP_MSM").is_ok() {
-            let data = bincode::serialize(&(points, scalars)).unwrap();
-            fs::File::create("/tmp/msm_fixture.bin").unwrap();
-            fs::write("/tmp/msm_fixture.bin", &data).unwrap();
-            eprintln!("[ipa] MSM fixture dumped: {} bytes", data.len());
-        }
-    }
+
     let result = pippenger(points, scalars, m, ml);
-    // Dans sp1_curve_msm, avant return
-    #[cfg(not(target_os = "zkvm"))]
     {
         use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
         use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+        use mina_curves::pasta::{Fq as ArkFq, ProjectiveVesta, Vesta};
 
-        // Reconstruit les points ark depuis nos bytes
-        type ArkFp = mina_curves::pasta::Fq; // Vesta base field
-        type ArkPoint = mina_curves::pasta::Vesta;
-        type ArkProj = mina_curves::pasta::ProjectiveVesta;
-
-        let ark_bases: Vec<ArkPoint> = points
+        let ark_pts: Vec<Vesta> = points
             .iter()
             .map(|(px, py)| {
                 if px == &[0u8; 32] && py == &[0u8; 32] {
-                    return ArkPoint::default();
+                    return Vesta::default();
                 }
-                ArkPoint::new_unchecked(
-                    ArkFp::deserialize_uncompressed(&px[..]).unwrap(),
-                    ArkFp::deserialize_uncompressed(&py[..]).unwrap(),
+                Vesta::new_unchecked(
+                    ArkFq::deserialize_uncompressed(&px[..]).unwrap(),
+                    ArkFq::deserialize_uncompressed(&py[..]).unwrap(),
                 )
             })
             .collect();
 
-        let ark_bigints: Vec<_> = scalars.iter().map(|s| ark_ff::BigInt::<4>(*s)).collect();
-
-        let ark_res = ArkProj::msm_bigint(&ark_bases, &ark_bigints).into_affine();
-
-        // Convertit notre résultat Jacobian en affine
-        // x_affine = X / Z²
-        let our_x_affine = if result.is_zero() {
-            None
-        } else {
-            let z2 = result.z.square();
-            let exp = m.wrapping_sub(&U256::from(2u64));
-            let mut r = Fp::one(m, ml);
-            let mut b = z2;
-            for i in 0..256 {
-                let byte = exp.to_le_bytes()[i / 8];
-                if (byte >> (i % 8)) & 1 == 1 {
-                    r = r.mul(b);
-                }
-                b = b.square();
-            }
-            Some(result.x.mul(r).to_le_bytes())
-        };
-
-        let mut ark_xb = [0u8; 32];
-        if !ark_res.is_zero() {
-            ark_res.x.serialize_uncompressed(&mut ark_xb[..]).unwrap();
-        }
+        let ark_scs: Vec<_> = scalars.iter().map(|s| ark_ff::BigInt::<4>(*s)).collect();
+        let ark_res = ProjectiveVesta::msm_bigint(&ark_pts, &ark_scs).into_affine();
 
         eprintln!(
-            "[pippenger] ark_is_zero={} our_is_zero={}",
+            "[sp1_msm] n={} ark_is_zero={} our_is_zero={} match={}",
+            points.len(),
             ark_res.is_zero(),
-            result.is_zero()
+            result.is_zero(),
+            ark_res.is_zero() == result.is_zero()
         );
-        if let Some(our_x) = our_x_affine {
-            eprintln!("[pippenger] match={}", our_x == ark_xb);
-            eprintln!("[pippenger] our x[..4]={:?}", &our_x[..4]);
-            eprintln!("[pippenger] ark x[..4]={:?}", &ark_xb[..4]);
-        }
     }
+
     result.is_zero()
 }
 

@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
+use ark_poly::domain::EvaluationDomain;
 use mina_curves::pasta::Vesta;
 use poly_commitment::{hash_map_cache::HashMapCache, SRS};
 use rkyv::{util::AlignedVec, Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use ark_poly::domain::EvaluationDomain;
 // ---------------------------------------------------------------------------
 // rkyv structs — used only for static SRS file embedding (include_bytes!)
 // ---------------------------------------------------------------------------
@@ -157,5 +157,8 @@ fn kimchi_proof() {
         &public_inputs,
     );
 
-    assert!(result.is_ok(), "verify failed: {:?}", result);
+    match result {
+        Ok(_) => {}
+        Err(e) => panic!("verify failed: {:?}", e),
+    }
 }

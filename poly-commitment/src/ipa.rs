@@ -262,7 +262,8 @@ impl<G: CommitmentCurve> SRS<G> {
             .map(|s| s.into_bigint().as_ref().try_into().unwrap())
             .collect();
 
-        let result = sp1_msm::sp1_vesta_msm(&pairs, &sc_bigints);
+
+        let result = sp1_msm::sp1_pallas_msm(&pairs, &sc_bigints);
         println!("cycle-tracker-end: ipa_final_msm");
         return result;
 
