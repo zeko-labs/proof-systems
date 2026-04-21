@@ -388,6 +388,15 @@ fn sp1_curve_msm(
     ml: [u64; 4],
 ) -> bool {
     debug_assert_eq!(points.len(), scalars.len());
+    eprintln!(
+        "[pippenger] n={} zeros_sc={} zeros_pt={}",
+        points.len(),
+        scalars.iter().filter(|s| *s == &[0u64; 4]).count(),
+        points
+            .iter()
+            .filter(|(px, py)| px == &[0u8; 32] && py == &[0u8; 32])
+            .count()
+    );
     let result = pippenger(points, scalars, m, ml);
     // Dans sp1_curve_msm, avant return
     #[cfg(not(target_os = "zkvm"))]
@@ -598,5 +607,94 @@ mod tests {
         let ark_res = ProjectiveVesta::msm_bigint(&ark_pts, &ark_scs).into_affine();
         let our_res = sp1_vesta_msm(&our_pts, &our_scs);
         assert_eq!(our_res, ark_res.is_zero());
+    }
+
+    #[test]
+    fn test_fp_mul_basic() {
+        // 2 * 3 = 6
+        let two = Fp::new(U256::from(2u64), FQ_MODULUS, FQ_MODULUS_LIMBS);
+        let three = Fp::new(U256::from(3u64), FQ_MODULUS, FQ_MODULUS_LIMBS);
+        let six = two.mul(three);
+        assert_eq!(six.v, U256::from(6u64), "2*3 != 6, got {:?}", six.v);
+
+        // (p-1) * 1 = p-1
+        let pm1 = Fp::new(
+            FQ_MODULUS.wrapping_sub(&U256::ONE),
+            FQ_MODULUS,
+            FQ_MODULUS_LIMBS,
+        );
+        let one = Fp::new(U256::ONE, FQ_MODULUS, FQ_MODULUS_LIMBS);
+        let res = pm1.mul(one);
+        assert_eq!(res.v, FQ_MODULUS.wrapping_sub(&U256::ONE), "(p-1)*1 failed");
+    }
+
+    #[test]
+    fn test_vesta_with_zero_scalars() {
+        use ark_ec::{CurveGroup, VariableBaseMSM};
+        use ark_ff::UniformRand;
+        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+        use mina_curves::pasta::{Fp as ArkFp, ProjectiveVesta, Vesta};
+
+        let mut rng = rand::thread_rng();
+        let ark_pts: Vec<_> = (0..10)
+            .map(|_| ProjectiveVesta::rand(&mut rng).into_affine())
+            .collect();
+
+        // Mix de scalaires normaux et zéros
+        let scalars: Vec<[u64; 4]> = vec![
+            [1, 0, 0, 0],
+            [0, 0, 0, 0],
+            [2, 0, 0, 0],
+            [0, 0, 0, 0],
+            [3, 0, 0, 0],
+            [0, 0, 0, 0],
+            [4, 0, 0, 0],
+            [0, 0, 0, 0],
+            [5, 0, 0, 0],
+            [0, 0, 0, 0],
+        ];
+
+        let our_pts: Vec<_> = ark_pts
+            .iter()
+            .map(|p| {
+                let mut xb = [0u8; 32];
+                let mut yb = [0u8; 32];
+                p.x.serialize_uncompressed(&mut xb[..]).unwrap();
+                p.y.serialize_uncompressed(&mut yb[..]).unwrap();
+                (xb, yb)
+            })
+            .collect();
+
+        let ark_bigints: Vec<_> = scalars.iter().map(|s| ark_ff::BigInt::<4>(*s)).collect();
+        let ark_res = ProjectiveVesta::msm_bigint(&ark_pts, &ark_bigints).into_affine();
+        let our_res = sp1_vesta_msm(&our_pts, &scalars);
+        assert_eq!(our_res, ark_res.is_zero());
+    }
+
+    #[test]
+    fn test_extract_bits() {
+        // Test cas limite : bit_idx=0, cross-limb
+        let sc = [u64::MAX, u64::MAX, u64::MAX, u64::MAX];
+
+        for c in [10usize, 17] {
+            for start in (0..255).step_by(c) {
+                let d = extract_bits(&sc, start, c);
+                let expected = (1usize << c) - 1;
+                assert_eq!(
+                    d, expected,
+                    "extract_bits failed at start={} c={}: got {} expected {}",
+                    start, c, d, expected
+                );
+            }
+        }
+
+        // Test avec scalar = 1
+        let sc_one = [1u64, 0, 0, 0];
+        let d = extract_bits(&sc_one, 0, 17);
+        assert_eq!(d, 1, "scalar=1 window=0 should give 1");
+        for w in 1..15 {
+            let d = extract_bits(&sc_one, w * 17, 17);
+            assert_eq!(d, 0, "scalar=1 window={} should give 0", w);
+        }
     }
 }
