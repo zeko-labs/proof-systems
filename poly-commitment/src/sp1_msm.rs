@@ -1,9 +1,26 @@
-//! SP1-optimized MSM for Pallas using crypto-bigint + sys_bigint precompile.
-//! Pallas: y² = x³ + 5, BaseField = Fp
-//! Coordinate system: Jacobian (X:Y:Z) where (x,y) = (X/Z², Y/Z³)
+//! SP1-optimized MSM for Vesta/Pallas using Pippenger + sys_bigint precompile.
+//! Vesta: y² = x³ + 5, BaseField = Fq
+//! https://eprint.iacr.org/2015/1060.pdf (addition formula)
 
+use ark_ec::AffineRepr;
+use ark_ff::PrimeField;
 use crypto_bigint::{Encoding, NonZero, U256, U512};
 
+// ---------------------------------------------------------------------------
+// Vesta base field (coordonnées des points IPA)
+// ---------------------------------------------------------------------------
+const FQ_MODULUS: U256 =
+    U256::from_be_hex("40000000000000000000000000000000224698fc0994a8dd8c46eb2100000001");
+const FQ_MODULUS_LIMBS: [u64; 4] = [
+    0x8c46eb2100000001,
+    0x224698fc0994a8dd,
+    0x0000000000000000,
+    0x4000000000000000,
+];
+
+// ---------------------------------------------------------------------------
+// Pallas base field
+// ---------------------------------------------------------------------------
 const FP_MODULUS: U256 =
     U256::from_be_hex("40000000000000000000000000000000224698fc094cf91b992d30ed00000001");
 const FP_MODULUS_LIMBS: [u64; 4] = [
@@ -13,39 +30,57 @@ const FP_MODULUS_LIMBS: [u64; 4] = [
     0x4000000000000000,
 ];
 
-// Vesta base field = Pallas scalar field
-// Fq modulus = 0x40000000000000000000000000000000224698fc0994a8dd8c46eb2100000001
-const FQ_MODULUS: U256 =
-    U256::from_be_hex("40000000000000000000000000000000224698fc0994a8dd8c46eb2100000001");
-const FQ_MODULUS_LIMBS: [u64; 4] = [
-    0x8c46eb2100000001,
-    0x224698fc0994a8dd,
-    0x0000000000000000,
-    0x4000000000000000,
-];
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Fp(U256);
+// ---------------------------------------------------------------------------
+// Generic Fp — modular arithmetic with sys_bigint on zkvm
+// ---------------------------------------------------------------------------
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Fp {
+    v: U256,
+    m: U256,      // modulus
+    ml: [u64; 4], // modulus limbs (little-endian) for sys_bigint
+}
 
 impl Fp {
-    const ZERO: Self = Fp(U256::ZERO);
-    const ONE: Self = Fp(U256::ONE);
-
-    #[inline(always)]
-    fn add(self, rhs: Self) -> Self {
-        Fp(self.0.add_mod(&rhs.0, &FP_MODULUS))
+    #[inline]
+    fn new(v: U256, m: U256, ml: [u64; 4]) -> Self {
+        Fp { v, m, ml }
+    }
+    #[inline]
+    fn zero(m: U256, ml: [u64; 4]) -> Self {
+        Fp::new(U256::ZERO, m, ml)
+    }
+    #[inline]
+    fn one(m: U256, ml: [u64; 4]) -> Self {
+        Fp::new(U256::ONE, m, ml)
+    }
+    #[inline]
+    fn k(&self, n: u64) -> Self {
+        Fp::new(U256::from(n), self.m, self.ml)
     }
 
     #[inline(always)]
+    fn add(self, rhs: Self) -> Self {
+        Fp::new(self.v.add_mod(&rhs.v, &self.m), self.m, self.ml)
+    }
+    #[inline(always)]
     fn sub(self, rhs: Self) -> Self {
-        Fp(self.0.sub_mod(&rhs.0, &FP_MODULUS))
+        Fp::new(self.v.sub_mod(&rhs.v, &self.m), self.m, self.ml)
+    }
+    #[inline(always)]
+    fn neg(self) -> Self {
+        if self.v == U256::ZERO {
+            self
+        } else {
+            Fp::new(self.m.wrapping_sub(&self.v), self.m, self.ml)
+        }
     }
 
     #[inline(always)]
     fn mul(self, rhs: Self) -> Self {
         #[cfg(target_os = "zkvm")]
         {
-            let lhs: [u64; 4] = bytemuck::cast(self.0.to_le_bytes());
-            let rhs_l: [u64; 4] = bytemuck::cast(rhs.0.to_le_bytes());
+            let lhs: [u64; 4] = bytemuck::cast(self.v.to_le_bytes());
+            let rhs_l: [u64; 4] = bytemuck::cast(rhs.v.to_le_bytes());
             let mut result = [0u64; 4];
             #[allow(unsafe_code)]
             unsafe {
@@ -54,20 +89,22 @@ impl Fp {
                     0,
                     &lhs as *const [u64; 4],
                     &rhs_l as *const [u64; 4],
-                    &FP_MODULUS_LIMBS as *const [u64; 4],
+                    &self.ml as *const [u64; 4],
                 );
             }
-            return Fp(U256::from_le_bytes(bytemuck::cast(result)));
+            return Fp::new(U256::from_le_bytes(bytemuck::cast(result)), self.m, self.ml);
         }
         #[cfg(not(target_os = "zkvm"))]
         {
-            let (lo, hi) = self.0.mul_wide(&rhs.0);
+            let (lo, hi) = self.v.mul_wide(&rhs.v);
             let wide = U512::from((lo, hi));
-            let m512 = U512::from((FP_MODULUS, U256::ZERO));
+            let m512 = U512::from((self.m, U256::ZERO));
             let (_, rem) = wide.div_rem(&NonZero::from_uint(m512));
-            Fp(U256::from_le_bytes(
-                rem.to_le_bytes()[..32].try_into().unwrap(),
-            ))
+            Fp::new(
+                U256::from_le_bytes(rem.to_le_bytes()[..32].try_into().unwrap()),
+                self.m,
+                self.ml,
+            )
         }
     }
 
@@ -76,80 +113,68 @@ impl Fp {
         self.mul(self)
     }
 
-    fn from_le_bytes(b: &[u8; 32]) -> Self {
-        Fp(U256::from_le_bytes(*b))
+    fn from_le(b: &[u8; 32], m: U256, ml: [u64; 4]) -> Self {
+        Fp::new(U256::from_le_bytes(*b), m, ml)
     }
     fn to_le_bytes(self) -> [u8; 32] {
-        self.0.to_le_bytes()
+        self.v.to_le_bytes()
     }
-
-    fn k(n: u64) -> Self {
-        Fp(U256::from(n))
+    fn is_zero(&self) -> bool {
+        self.v == U256::ZERO
     }
 }
 
 // ---------------------------------------------------------------------------
-// Pallas in Jacobian coordinates: (X:Y:Z) → affine (X/Z², Y/Z³)
-// Infinity = (1:1:0)
-// Curve: y² = x³ + 5  (a=0, b=5)
+// Elliptic curve point in Jacobian coordinates
+// Affine (x,y) → Jacobian (x:y:1)
+// Infinity   → (1:1:0)
 // ---------------------------------------------------------------------------
 #[derive(Clone, Copy, Debug)]
-struct Pallas {
+struct Point {
     x: Fp,
     y: Fp,
     z: Fp,
 }
 
-impl Pallas {
-    const INFINITY: Self = Pallas {
-        x: Fp::ONE,
-        y: Fp::ONE,
-        z: Fp::ZERO,
-    };
-
-    fn from_affine(x: Fp, y: Fp) -> Self {
-        Pallas { x, y, z: Fp::ONE }
-    }
-
-    fn is_zero(&self) -> bool {
-        self.z == Fp::ZERO
-    }
-
-    /// Jacobian point doubling, a=0
-    /// Cost: 1I + 3S + 6M (no inversions needed in projective)
-    fn double(self) -> Self {
-        if self.is_zero() || self.y == Fp::ZERO {
-            return Self::INFINITY;
+impl Point {
+    fn infinity(m: U256, ml: [u64; 4]) -> Self {
+        Point {
+            x: Fp::one(m, ml),
+            y: Fp::one(m, ml),
+            z: Fp::zero(m, ml),
         }
+    }
+    fn from_affine(x: Fp, y: Fp) -> Self {
+        let one = Fp::one(x.m, x.ml);
+        Point { x, y, z: one }
+    }
+    fn is_zero(&self) -> bool {
+        self.z.is_zero()
+    }
 
-        // a = X1²
+    /// Jacobian doubling, a=0
+    fn double(self) -> Self {
+        if self.is_zero() || self.y.is_zero() {
+            return Point::infinity(self.x.m, self.x.ml);
+        }
         let a = self.x.square();
-        // b = Y1²
         let b = self.y.square();
-        // c = b²
         let c = b.square();
-        // d = 2*((X1+b)² - a - c)
-        let d = Fp::k(2).mul(self.x.add(b).square().sub(a).sub(c));
-        // e = 3*a  (a_coeff=0, so skip a*Z1⁴)
-        let e = Fp::k(3).mul(a);
-        // f = e²
+        let x1b = self.x.add(b);
+        let d = self.x.k(2).mul(x1b.square().sub(a).sub(c));
+        let e = self.x.k(3).mul(a);
         let f = e.square();
-        // X3 = f - 2*d
-        let x3 = f.sub(Fp::k(2).mul(d));
-        // Y3 = e*(d - X3) - 8*c
-        let y3 = e.mul(d.sub(x3)).sub(Fp::k(8).mul(c));
-        // Z3 = 2*Y1*Z1
-        let z3 = Fp::k(2).mul(self.y).mul(self.z);
-
-        Pallas {
+        let x3 = f.sub(self.x.k(2).mul(d));
+        let y3 = e.mul(d.sub(x3)).sub(self.x.k(8).mul(c));
+        let z3 = self.x.k(2).mul(self.y).mul(self.z);
+        Point {
             x: x3,
             y: y3,
             z: z3,
         }
     }
 
-    /// Full Jacobian-Jacobian addition
-    /// Cost: 12M + 4S
+    /// Full Jacobian addition
     fn add(self, rhs: Self) -> Self {
         if self.is_zero() {
             return rhs;
@@ -158,39 +183,30 @@ impl Pallas {
             return self;
         }
 
-        // Z1² , Z2²
         let z1z1 = self.z.square();
         let z2z2 = rhs.z.square();
-        // U1 = X1*Z2², U2 = X2*Z1²
         let u1 = self.x.mul(z2z2);
         let u2 = rhs.x.mul(z1z1);
-        // S1 = Y1*Z2*Z2², S2 = Y2*Z1*Z1²
         let s1 = self.y.mul(rhs.z).mul(z2z2);
         let s2 = rhs.y.mul(self.z).mul(z1z1);
-        // H = U2 - U1,  R = S2 - S1
         let h = u2.sub(u1);
         let r = s2.sub(s1);
 
-        if h == Fp::ZERO {
-            return if r == Fp::ZERO {
+        if h.is_zero() {
+            return if r.is_zero() {
                 self.double()
             } else {
-                Self::INFINITY
+                Point::infinity(self.x.m, self.x.ml)
             };
         }
 
-        let hh = h.square(); // H²
-        let hhh = h.mul(hh); // H³
-        let v = u1.mul(hh); // V = U1*H²
-
-        // X3 = R² - H³ - 2*V
-        let x3 = r.square().sub(hhh).sub(Fp::k(2).mul(v));
-        // Y3 = R*(V - X3) - S1*H³
+        let hh = h.square();
+        let hhh = h.mul(hh);
+        let v = u1.mul(hh);
+        let x3 = r.square().sub(hhh).sub(self.x.k(2).mul(v));
         let y3 = r.mul(v.sub(x3)).sub(s1.mul(hhh));
-        // Z3 = H*Z1*Z2
         let z3 = h.mul(self.z).mul(rhs.z);
-
-        Pallas {
+        Point {
             x: x3,
             y: y3,
             z: z3,
@@ -198,286 +214,192 @@ impl Pallas {
     }
 
     /// Mixed addition: Jacobian self + affine (x2, y2)
-    /// Cost: 8M + 3S (cheaper than full Jacobian-Jacobian)
+    /// Saves 4M vs full Jacobian addition (Z2=1 optimization)
     fn add_affine(self, x2: Fp, y2: Fp) -> Self {
         if self.is_zero() {
-            return Self::from_affine(x2, y2);
+            return Point::from_affine(x2, y2);
         }
 
-        let z1z1 = self.z.square(); // Z1²
-        let u2 = x2.mul(z1z1); // U2 = X2*Z1²
-        let s2 = y2.mul(self.z).mul(z1z1); // S2 = Y2*Z1*Z1²
-        let h = u2.sub(self.x); // H = U2 - X1
-        let r = s2.sub(self.y); // R = S2 - Y1
+        let z1z1 = self.z.square();
+        let u2 = x2.mul(z1z1);
+        let s2 = y2.mul(self.z).mul(z1z1);
+        let h = u2.sub(self.x);
+        let r = s2.sub(self.y);
 
-        if h == Fp::ZERO {
-            return if r == Fp::ZERO {
+        if h.is_zero() {
+            return if r.is_zero() {
                 self.double()
             } else {
-                Self::INFINITY
+                Point::infinity(self.x.m, self.x.ml)
             };
         }
 
         let hh = h.square();
         let hhh = h.mul(hh);
         let v = self.x.mul(hh);
-
-        let x3 = r.square().sub(hhh).sub(Fp::k(2).mul(v));
+        let x3 = r.square().sub(hhh).sub(self.x.k(2).mul(v));
         let y3 = r.mul(v.sub(x3)).sub(self.y.mul(hhh));
         let z3 = h.mul(self.z);
-
-        Pallas {
+        Point {
             x: x3,
             y: y3,
             z: z3,
         }
     }
 
-    fn scalar_mul(self, scalar_bytes: &[u8; 32]) -> Self {
-        let mut result = Self::INFINITY;
-        let mut base = self;
-        for byte in scalar_bytes.iter() {
-            for bit in 0..8u32 {
-                if (byte >> bit) & 1 == 1 {
-                    result = result.add(base);
-                }
-                base = base.double();
-            }
+    fn neg(self) -> Self {
+        if self.is_zero() {
+            return self;
         }
-        result
+        Point {
+            x: self.x,
+            y: self.y.neg(),
+            z: self.z,
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Public MSM
+// Pippenger MSM
+//
+// Algorithm:
+//   c = window size (bits)
+//   For each c-bit window of each scalar:
+//     bucket[digit] += point
+//   Combine buckets with running sum trick
+//   Combine windows: result = sum_w (window_w * 2^(w*c))
 // ---------------------------------------------------------------------------
-pub fn sp1_vesta_msm(points: &[([u8; 32], [u8; 32])], scalars: &[[u64; 4]]) -> bool {
-    sp1_curve_msm(points, scalars, &FQ_MODULUS, &FQ_MODULUS_LIMBS)
+fn pippenger(
+    points: &[([u8; 32], [u8; 32])],
+    scalars: &[[u64; 4]],
+    m: U256,
+    ml: [u64; 4],
+) -> Point {
+    let n = points.len();
+    if n == 0 {
+        return Point::infinity(m, ml);
+    }
+
+    // Window size: same heuristic as ark-ec
+    let c = if n < 32 { 3 } else { ln_without_floats(n) + 2 };
+
+    let num_bits = 255usize;
+    let num_windows = (num_bits + c - 1) / c;
+    let num_buckets = (1usize << c) - 1;
+
+    // Pre-parse all points — skip zero points
+    let parsed: Vec<Option<(Fp, Fp)>> = points
+        .iter()
+        .map(|(px, py)| {
+            if px == &[0u8; 32] && py == &[0u8; 32] {
+                return None;
+            }
+            Some((Fp::from_le(px, m, ml), Fp::from_le(py, m, ml)))
+        })
+        .collect();
+
+    let mut window_sums: Vec<Point> = Vec::with_capacity(num_windows);
+
+    for w in 0..num_windows {
+        let mut buckets = vec![Point::infinity(m, ml); num_buckets + 1];
+
+        for (i, sc) in scalars.iter().enumerate() {
+            if parsed[i].is_none() {
+                continue;
+            }
+
+            // Extract c-bit window at position w*c
+            let digit = extract_bits(sc, w * c, c);
+            if digit == 0 {
+                continue;
+            }
+
+            let (px, py) = parsed[i].unwrap();
+            buckets[digit] = buckets[digit].add_affine(px, py);
+        }
+
+        // Sum buckets: sum_{i=1}^{2^c-1} i * bucket[i]
+        // = sum_{i=1}^{2^c-1} (sum_{j=i}^{2^c-1} bucket[j])
+        // Uses the running-sum trick: 2*(2^c-1) additions
+        let mut running_sum = Point::infinity(m, ml);
+        let mut window_sum = Point::infinity(m, ml);
+        for b in (1..=num_buckets).rev() {
+            running_sum = running_sum.add(buckets[b]);
+            window_sum = window_sum.add(running_sum);
+        }
+
+        window_sums.push(window_sum);
+    }
+
+    // Combine windows: result = sum_w window_w * 2^(w*c)
+    // Traverse from highest to lowest window
+    let mut result = Point::infinity(m, ml);
+    for window_sum in window_sums.iter().rev() {
+        // Shift left by c bits (multiply by 2^c)
+        for _ in 0..c {
+            result = result.double();
+        }
+        result = result.add(*window_sum);
+    }
+
+    result
 }
 
-pub fn sp1_pallas_msm(points: &[([u8; 32], [u8; 32])], scalars: &[[u64; 4]]) -> bool {
-    sp1_curve_msm(points, scalars, &FP_MODULUS, &FP_MODULUS_LIMBS)
+/// Extract `width` bits from a [u64; 4] little-endian scalar starting at bit `start`
+#[inline]
+fn extract_bits(scalar: &[u64; 4], start: usize, width: usize) -> usize {
+    let limb_idx = start / 64;
+    let bit_idx = start % 64;
+
+    if limb_idx >= 4 {
+        return 0;
+    }
+
+    let lo = scalar[limb_idx] >> bit_idx;
+
+    let hi = if bit_idx + width > 64 && limb_idx + 1 < 4 {
+        scalar[limb_idx + 1] << (64 - bit_idx)
+    } else {
+        0
+    };
+
+    let mask = (1usize << width) - 1;
+    ((lo | hi) as usize) & mask
 }
 
+/// Integer log2 without floats (same as ark-ec)
+fn ln_without_floats(n: usize) -> usize {
+    let mut log = 0;
+    let mut x = n;
+    while x > 1 {
+        x >>= 1;
+        log += 1;
+    }
+    log
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 fn sp1_curve_msm(
     points: &[([u8; 32], [u8; 32])],
     scalars: &[[u64; 4]],
-    modulus: &U256,
-    modulus_limbs: &[u64; 4],
+    m: U256,
+    ml: [u64; 4],
 ) -> bool {
     debug_assert_eq!(points.len(), scalars.len());
-
-    // ------------------------------------------------------------------
-    // Inner Fp type parametrized by modulus
-    // ------------------------------------------------------------------
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    struct Fp {
-        v: U256,
-        modulus: U256,
-        modulus_limbs: [u64; 4],
-    }
-
-    impl Fp {
-        fn zero(modulus: &U256, modulus_limbs: &[u64; 4]) -> Self {
-            Fp {
-                v: U256::ZERO,
-                modulus: *modulus,
-                modulus_limbs: *modulus_limbs,
-            }
-        }
-        fn one(modulus: &U256, modulus_limbs: &[u64; 4]) -> Self {
-            Fp {
-                v: U256::ONE,
-                modulus: *modulus,
-                modulus_limbs: *modulus_limbs,
-            }
-        }
-        fn from_le(b: &[u8; 32], modulus: &U256, modulus_limbs: &[u64; 4]) -> Self {
-            Fp {
-                v: U256::from_le_bytes(*b),
-                modulus: *modulus,
-                modulus_limbs: *modulus_limbs,
-            }
-        }
-        fn k(&self, n: u64) -> Self {
-            Fp {
-                v: U256::from(n),
-                modulus: self.modulus,
-                modulus_limbs: self.modulus_limbs,
-            }
-        }
-        fn add(self, rhs: Self) -> Self {
-            Fp {
-                v: self.v.add_mod(&rhs.v, &self.modulus),
-                ..self
-            }
-        }
-        fn sub(self, rhs: Self) -> Self {
-            Fp {
-                v: self.v.sub_mod(&rhs.v, &self.modulus),
-                ..self
-            }
-        }
-        fn mul(self, rhs: Self) -> Self {
-            #[cfg(target_os = "zkvm")]
-            {
-                let lhs: [u64; 4] = bytemuck::cast(self.v.to_le_bytes());
-                let rhs_l: [u64; 4] = bytemuck::cast(rhs.v.to_le_bytes());
-                let mut result = [0u64; 4];
-                #[allow(unsafe_code)]
-                unsafe {
-                    sp1_lib::sys_bigint(
-                        &mut result as *mut [u64; 4],
-                        0,
-                        &lhs as *const [u64; 4],
-                        &rhs_l as *const [u64; 4],
-                        &self.modulus_limbs as *const [u64; 4],
-                    );
-                }
-                return Fp {
-                    v: U256::from_le_bytes(bytemuck::cast(result)),
-                    ..self
-                };
-            }
-            #[cfg(not(target_os = "zkvm"))]
-            {
-                let (lo, hi) = self.v.mul_wide(&rhs.v);
-                let wide = U512::from((lo, hi));
-                let m512 = U512::from((self.modulus, U256::ZERO));
-                let (_, rem) = wide.div_rem(&NonZero::from_uint(m512));
-                Fp {
-                    v: U256::from_le_bytes(rem.to_le_bytes()[..32].try_into().unwrap()),
-                    ..self
-                }
-            }
-        }
-        fn square(self) -> Self {
-            self.mul(self)
-        }
-        fn to_le_bytes(self) -> [u8; 32] {
-            self.v.to_le_bytes()
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Point in Jacobian coordinates
-    // ------------------------------------------------------------------
-    #[derive(Clone, Copy)]
-    struct Point {
-        x: Fp,
-        y: Fp,
-        z: Fp,
-    }
-
-    impl Point {
-        fn infinity(modulus: &U256, modulus_limbs: &[u64; 4]) -> Self {
-            Point {
-                x: Fp::one(modulus, modulus_limbs),
-                y: Fp::one(modulus, modulus_limbs),
-                z: Fp::zero(modulus, modulus_limbs),
-            }
-        }
-        fn from_affine(x: Fp, y: Fp) -> Self {
-            let one = Fp::one(&x.modulus, &x.modulus_limbs);
-            Point { x, y, z: one }
-        }
-        fn is_zero(&self) -> bool {
-            self.z.v == U256::ZERO
-        }
-
-        fn double(self) -> Self {
-            if self.is_zero() || self.y.v == U256::ZERO {
-                return Point::infinity(&self.x.modulus, &self.x.modulus_limbs);
-            }
-            let a = self.x.square();
-            let b = self.y.square();
-            let c = b.square();
-            let d = self.x.k(2).mul(self.x.add(b).square().sub(a).sub(c));
-            let e = self.x.k(3).mul(a);
-            let f = e.square();
-            let x3 = f.sub(self.x.k(2).mul(d));
-            let y3 = e.mul(d.sub(x3)).sub(self.x.k(8).mul(c));
-            let z3 = self.x.k(2).mul(self.y).mul(self.z);
-            Point {
-                x: x3,
-                y: y3,
-                z: z3,
-            }
-        }
-
-        fn add(self, rhs: Self) -> Self {
-            if self.is_zero() {
-                return rhs;
-            }
-            if rhs.is_zero() {
-                return self;
-            }
-
-            let z1z1 = self.z.square();
-            let z2z2 = rhs.z.square();
-            let u1 = self.x.mul(z2z2);
-            let u2 = rhs.x.mul(z1z1);
-            let s1 = self.y.mul(rhs.z).mul(z2z2);
-            let s2 = rhs.y.mul(self.z).mul(z1z1);
-            let h = u2.sub(u1);
-            let r = s2.sub(s1);
-
-            if h.v == U256::ZERO {
-                return if r.v == U256::ZERO {
-                    self.double()
-                } else {
-                    Point::infinity(&self.x.modulus, &self.x.modulus_limbs)
-                };
-            }
-
-            let hh = h.square();
-            let hhh = h.mul(hh);
-            let v = u1.mul(hh);
-            let x3 = r.square().sub(hhh).sub(self.x.k(2).mul(v));
-            let y3 = r.mul(v.sub(x3)).sub(s1.mul(hhh));
-            let z3 = h.mul(self.z).mul(rhs.z);
-
-            Point {
-                x: x3,
-                y: y3,
-                z: z3,
-            }
-        }
-
-        fn scalar_mul(self, scalar_bytes: &[u8; 32]) -> Self {
-            let mut result = Point::infinity(&self.x.modulus, &self.x.modulus_limbs);
-            let mut base = self;
-            for byte in scalar_bytes.iter() {
-                for bit in 0..8u32 {
-                    if (byte >> bit) & 1 == 1 {
-                        result = result.add(base);
-                    }
-                    base = base.double();
-                }
-            }
-            result
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // MSM
-    // ------------------------------------------------------------------
-    let mut acc = Point::infinity(modulus, modulus_limbs);
-
-    for ((px, py), sc) in points.iter().zip(scalars.iter()) {
-        if px == &[0u8; 32] && py == &[0u8; 32] {
-            continue;
-        }
-        let scalar_bytes: [u8; 32] = bytemuck::cast(*sc);
-        let p = Point::from_affine(
-            Fp::from_le(px, modulus, modulus_limbs),
-            Fp::from_le(py, modulus, modulus_limbs),
-        );
-        acc = acc.add(p.scalar_mul(&scalar_bytes));
-    }
-
-    acc.is_zero()
+    let result = pippenger(points, scalars, m, ml);
+    result.is_zero()
 }
+
+pub fn sp1_vesta_msm(points: &[([u8; 32], [u8; 32])], scalars: &[[u64; 4]]) -> bool {
+    sp1_curve_msm(points, scalars, FQ_MODULUS, FQ_MODULUS_LIMBS)
+}
+
+pub fn sp1_pallas_msm(points: &[([u8; 32], [u8; 32])], scalars: &[[u64; 4]]) -> bool {
+    sp1_curve_msm(points, scalars, FP_MODULUS, FP_MODULUS_LIMBS)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -485,14 +407,16 @@ fn sp1_curve_msm(
 mod tests {
     use super::*;
     use ark_ec::{CurveGroup, VariableBaseMSM};
+    use ark_ff::UniformRand;
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
     use mina_curves::pasta::{
-        Fp as ArkFp, Pallas as ArkPallas, PallasParameters, ProjectivePallas,
+        Fq as ArkFq, Pallas as ArkPallas, PallasParameters, ProjectivePallas, ProjectiveVesta,
+        Vesta as ArkVesta, VestaParameters,
     };
 
-    fn generator() -> ([u8; 32], [u8; 32]) {
+    fn vesta_generator() -> ([u8; 32], [u8; 32]) {
         use ark_ec::short_weierstrass::SWCurveConfig;
-        let g = PallasParameters::GENERATOR;
+        let g = VestaParameters::GENERATOR;
         let mut xb = [0u8; 32];
         let mut yb = [0u8; 32];
         g.x.serialize_uncompressed(&mut xb[..]).unwrap();
@@ -500,11 +424,12 @@ mod tests {
         (xb, yb)
     }
 
-    fn ark_mul(px: &[u8; 32], py: &[u8; 32], sc: [u64; 4]) -> [u8; 32] {
-        let res = ProjectivePallas::msm_bigint(
-            &[ArkPallas::new_unchecked(
-                ArkFp::deserialize_uncompressed(&px[..]).unwrap(),
-                ArkFp::deserialize_uncompressed(&py[..]).unwrap(),
+    fn ark_vesta_mul(px: &[u8; 32], py: &[u8; 32], sc: [u64; 4]) -> [u8; 32] {
+        use mina_curves::pasta::Fq as ArkFq;
+        let res = ProjectiveVesta::msm_bigint(
+            &[ArkVesta::new_unchecked(
+                ArkFq::deserialize_uncompressed(&px[..]).unwrap(),
+                ArkFq::deserialize_uncompressed(&py[..]).unwrap(),
             )],
             &[ark_ff::BigInt::<4>(sc)],
         )
@@ -514,11 +439,11 @@ mod tests {
         xb
     }
 
-    fn our_x(p: Pallas) -> [u8; 32] {
-        // Convert Jacobian to affine x = X/Z²
+    fn our_vesta_x(p: Point) -> [u8; 32] {
+        // Jacobian → affine: x = X/Z²
         let z2 = p.z.square();
-        let exp = FP_MODULUS.wrapping_sub(&U256::from(2u64));
-        let mut r = Fp::ONE;
+        let exp = FQ_MODULUS.wrapping_sub(&U256::from(2u64));
+        let mut r = Fp::one(FQ_MODULUS, FQ_MODULUS_LIMBS);
         let mut b = z2;
         for i in 0..256 {
             let byte = exp.to_le_bytes()[i / 8];
@@ -531,35 +456,37 @@ mod tests {
     }
 
     #[test]
-    fn test_msm_5g_7g() {
-        let (gx, gy) = generator();
-        assert!(!sp1_pallas_msm(
-            &[(gx, gy), (gx, gy)],
-            &[[5, 0, 0, 0], [7, 0, 0, 0]]
-        ));
+    fn test_vesta_1g() {
+        let (gx, gy) = vesta_generator();
+        let sc = [1u64, 0, 0, 0];
+        let res = pippenger(&[(gx, gy)], &[sc], FQ_MODULUS, FQ_MODULUS_LIMBS);
+        assert_eq!(our_vesta_x(res), gx, "1*G != G");
     }
 
     #[test]
-    fn test_msm_many_random() {
-        use ark_ec::AffineRepr;
-        use ark_ec::{CurveGroup, VariableBaseMSM};
-        use ark_ff::UniformRand;
-        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-        use mina_curves::pasta::{Fp as ArkFp, Pallas as ArkPallas, ProjectivePallas};
+    fn test_vesta_2g() {
+        let (gx, gy) = vesta_generator();
+        let sc = [2u64, 0, 0, 0];
+        let res = pippenger(&[(gx, gy)], &[sc], FQ_MODULUS, FQ_MODULUS_LIMBS);
+        assert_eq!(
+            our_vesta_x(res),
+            ark_vesta_mul(&gx, &gy, sc),
+            "2*G mismatch"
+        );
+    }
 
+    #[test]
+    fn test_vesta_random() {
+        use ark_ec::CurveGroup;
         let mut rng = rand::thread_rng();
-        let n = 10;
-
-        let ark_points: Vec<_> = (0..n)
-            .map(|_| ProjectivePallas::rand(&mut rng).into_affine())
+        let n = 20;
+        let ark_pts: Vec<_> = (0..n)
+            .map(|_| ProjectiveVesta::rand(&mut rng).into_affine())
             .collect();
-
-        let scalars: Vec<[u64; 4]> = (0..n)
-            .map(|_| [rand::random::<u64>() % 1000, 0, 0, 0])
+        let ark_scs: Vec<_> = (0..n)
+            .map(|_| mina_curves::pasta::Fp::rand(&mut rng).into_bigint())
             .collect();
-
-        // Nos points en bytes
-        let our_points: Vec<([u8; 32], [u8; 32])> = ark_points
+        let our_pts: Vec<_> = ark_pts
             .iter()
             .map(|p| {
                 let mut xb = [0u8; 32];
@@ -569,125 +496,28 @@ mod tests {
                 (xb, yb)
             })
             .collect();
-
-        // ark MSM
-        let ark_bases: Vec<ArkPallas> = ark_points.clone();
-        let ark_bigints: Vec<_> = scalars.iter().map(|s| ark_ff::BigInt::<4>(*s)).collect();
-        let ark_res = ProjectivePallas::msm_bigint(&ark_bases, &ark_bigints).into_affine();
-
-        // notre MSM
-        let our_res = sp1_pallas_msm(&our_points, &scalars);
-
-        let mut ark_xb = [0u8; 32];
-        if !ark_res.is_zero() {
-            ark_res.x.serialize_uncompressed(&mut ark_xb[..]).unwrap();
-        }
-
-        eprintln!("ark is_zero: {}", ark_res.is_zero());
-        eprintln!("our is_zero: {}", our_res);
-
-        assert_eq!(our_res, ark_res.is_zero(), "MSM result mismatch");
-    }
-
-    #[test]
-    fn test_msm_with_large_scalars() {
-        use ark_ec::AffineRepr;
-        use ark_ec::{CurveGroup, VariableBaseMSM};
-        use ark_ff::PrimeField;
-        use ark_ff::UniformRand;
-        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-        use mina_curves::pasta::{Fp as ArkFp, Fq, Pallas as ArkPallas, ProjectivePallas};
-
-        let mut rng = rand::thread_rng();
-        let n = 10;
-
-        let ark_points: Vec<_> = (0..n)
-            .map(|_| ProjectivePallas::rand(&mut rng).into_affine())
-            .collect();
-
-        // Scalaires vraiment aléatoires (pleine taille 256 bits)
-        let ark_scalars: Vec<Fq> = (0..n).map(|_| Fq::rand(&mut rng)).collect();
-        let ark_bigints: Vec<_> = ark_scalars.iter().map(|s| s.into_bigint()).collect();
-        let scalars: Vec<[u64; 4]> = ark_bigints
+        let our_scs: Vec<[u64; 4]> = ark_scs
             .iter()
-            .map(|b: &ark_ff::BigInt<4>| b.as_ref().try_into().unwrap())
+            .map(|s| s.as_ref().try_into().unwrap())
             .collect();
 
-        let our_points: Vec<([u8; 32], [u8; 32])> = ark_points
-            .iter()
-            .map(|p| {
-                let mut xb = [0u8; 32];
-                let mut yb = [0u8; 32];
-                p.x.serialize_uncompressed(&mut xb[..]).unwrap();
-                p.y.serialize_uncompressed(&mut yb[..]).unwrap();
-                (xb, yb)
-            })
-            .collect();
-
-        let ark_res = ProjectivePallas::msm_bigint(&ark_points, &ark_bigints).into_affine();
-        let our_res = sp1_pallas_msm(&our_points, &scalars);
-
+        let ark_res = ProjectiveVesta::msm_bigint(&ark_pts, &ark_scs).into_affine();
+        let our_res = sp1_vesta_msm(&our_pts, &our_scs);
         assert_eq!(our_res, ark_res.is_zero());
     }
 
     #[test]
-    fn test_negative_scalar() {
-        use ark_ec::{CurveGroup, VariableBaseMSM};
-        use ark_ff::One;
-        use ark_ff::PrimeField;
-        use ark_ff::UniformRand;
-        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-        use mina_curves::pasta::{Fp as ArkFp, Fq, Pallas as ArkPallas, ProjectivePallas};
-
+    fn test_vesta_full_size() {
+        use ark_ec::CurveGroup;
         let mut rng = rand::thread_rng();
-        let ark_p = ProjectivePallas::rand(&mut rng).into_affine();
-        let mut px = [0u8; 32];
-        let mut py = [0u8; 32];
-        ark_p.x.serialize_uncompressed(&mut px[..]).unwrap();
-        ark_p.y.serialize_uncompressed(&mut py[..]).unwrap();
-
-        // Scalaire "négatif" : p-1 en représentation BigInt
-        let neg_one = (-Fq::one()).into_bigint();
-        let sc: [u64; 4] = neg_one.as_ref().try_into().unwrap();
-
-        let ark_res = ProjectivePallas::msm_bigint(&[ark_p], &[neg_one]).into_affine();
-        let our = Pallas::from_affine(Fp::from_le_bytes(&px), Fp::from_le_bytes(&py))
-            .scalar_mul(&bytemuck::cast(sc));
-
-        let mut ark_xb = [0u8; 32];
-        ark_res.x.serialize_uncompressed(&mut ark_xb[..]).unwrap();
-
-        eprintln!("our x[..4] = {:?}", &our_x(our)[..4]);
-        eprintln!("ark x[..4] = {:?}", &ark_xb[..4]);
-        assert_eq!(our_x(our), ark_xb, "(p-1)*G mismatch");
-    }
-
-    #[test]
-    fn test_msm_full_size_random_scalars() {
-        use ark_ec::AffineRepr;
-        use ark_ec::{CurveGroup, VariableBaseMSM};
-        use ark_ff::One;
-        use ark_ff::PrimeField;
-        use ark_ff::UniformRand;
-        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-        use mina_curves::pasta::{Fp as ArkFp, Fq, Pallas as ArkPallas, ProjectivePallas};
-
-        let mut rng = rand::thread_rng();
-        let n = 428; // même taille que dans le test
-
-        let ark_points: Vec<_> = (0..n)
-            .map(|_| ProjectivePallas::rand(&mut rng).into_affine())
+        let n = 450;
+        let ark_pts: Vec<_> = (0..n)
+            .map(|_| ProjectiveVesta::rand(&mut rng).into_affine())
             .collect();
-
-        // Scalaires pleine taille incluant négatifs
-        let ark_scalars: Vec<_> = (0..n).map(|_| Fq::rand(&mut rng).into_bigint()).collect();
-        let scalars: Vec<[u64; 4]> = ark_scalars
-            .iter()
-            .map(|b| b.as_ref().try_into().unwrap())
+        let ark_scs: Vec<_> = (0..n)
+            .map(|_| mina_curves::pasta::Fp::rand(&mut rng).into_bigint())
             .collect();
-
-        // Inclut aussi des zéros
-        let mut our_points: Vec<([u8; 32], [u8; 32])> = ark_points
+        let our_pts: Vec<_> = ark_pts
             .iter()
             .map(|p| {
                 let mut xb = [0u8; 32];
@@ -697,21 +527,13 @@ mod tests {
                 (xb, yb)
             })
             .collect();
+        let our_scs: Vec<[u64; 4]> = ark_scs
+            .iter()
+            .map(|s: &ark_ff::BigInt<4>| s.as_ref().try_into().unwrap())
+            .collect();
 
-        // Ajoute quelques points à l'infini (padding comme dans ipa.rs)
-        for _ in 0..20 {
-            our_points.push(([0u8; 32], [0u8; 32]));
-        }
-        let mut pad_scalars = scalars.clone();
-        for _ in 0..20 {
-            pad_scalars.push([0u64; 4]);
-        }
-
-        let ark_res = ProjectivePallas::msm_bigint(&ark_points, &ark_scalars).into_affine();
-        let our_res = sp1_pallas_msm(&our_points, &pad_scalars);
-
-        eprintln!("ark is_zero: {}", ark_res.is_zero());
-        eprintln!("our is_zero: {}", our_res);
+        let ark_res = ProjectiveVesta::msm_bigint(&ark_pts, &ark_scs).into_affine();
+        let our_res = sp1_vesta_msm(&our_pts, &our_scs);
         assert_eq!(our_res, ark_res.is_zero());
     }
 }
