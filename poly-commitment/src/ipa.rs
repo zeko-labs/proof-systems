@@ -236,32 +236,32 @@ impl<G: CommitmentCurve> SRS<G> {
         // ------------------------------------------------------------------
         // Stage 2 — Final MSM using SP1-optimized Vesta MSM
         // ------------------------------------------------------------------
-        println!("cycle-tracker-start: ipa_pairs");
+        // println!("cycle-tracker-start: ipa_pairs");
 
-        let pairs: Vec<([u8; 32], [u8; 32])> = points
-            .iter()
-            .map(|p| {
-                if p.is_zero() {
-                    return ([0u8; 32], [0u8; 32]);
-                }
-                let (x, y) = p.xy().unwrap();
-                let x_limbs: [u64; 4] = x.into_bigint().as_ref().try_into().unwrap();
-                let y_limbs: [u64; 4] = y.into_bigint().as_ref().try_into().unwrap();
-                (bytemuck::cast(x_limbs), bytemuck::cast(y_limbs))
-            })
-            .collect();
+        // let pairs: Vec<([u8; 32], [u8; 32])> = points
+        //     .iter()
+        //     .map(|p| {
+        //         if p.is_zero() {
+        //             return ([0u8; 32], [0u8; 32]);
+        //         }
+        //         let (x, y) = p.xy().unwrap();
+        //         let x_limbs: [u64; 4] = x.into_bigint().as_ref().try_into().unwrap();
+        //         let y_limbs: [u64; 4] = y.into_bigint().as_ref().try_into().unwrap();
+        //         (bytemuck::cast(x_limbs), bytemuck::cast(y_limbs))
+        //     })
+        //     .collect();
 
-        let sc_bigints: Vec<[u64; 4]> = scalars
-            .iter()
-            .map(|s| s.into_bigint().as_ref().try_into().unwrap())
-            .collect();
+        // let sc_bigints: Vec<[u64; 4]> = scalars
+        //     .iter()
+        //     .map(|s| s.into_bigint().as_ref().try_into().unwrap())
+        //     .collect();
 
-        println!("cycle-tracker-end: ipa_pairs");
+        // println!("cycle-tracker-end: ipa_pairs");
 
-        println!("cycle-tracker-start: ipa_final_msm");
-        let result = sp1_msm::sp1_pallas_msm(&pairs, &sc_bigints);
-        println!("cycle-tracker-end: ipa_final_msm");
-        return result;
+        // println!("cycle-tracker-start: ipa_final_msm");
+        // let result = sp1_msm::sp1_pallas_msm(&pairs, &sc_bigints);
+        // println!("cycle-tracker-end: ipa_final_msm");
+        // return result;
 
         // Verify the equation in two chunks, which is optimal for our SRS size.
         // (see the comment to the `benchmark_msm_parallel_vesta` MSM benchmark)
