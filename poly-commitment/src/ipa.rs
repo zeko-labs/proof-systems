@@ -238,30 +238,30 @@ impl<G: CommitmentCurve> SRS<G> {
         // Verify the equation in two chunks, which is optimal for our SRS size.
         // (see the comment to the `benchmark_msm_parallel_vesta` MSM benchmark)
         let msm_res = {
-            println!("parallel msm");
-            let chunk_size = points.len() / 2;
-            points
-                .into_par_iter()
-                .chunks(chunk_size)
-                .zip(scalars.into_par_iter().chunks(chunk_size))
-                .map(|(bases, coeffs)| {
-                    let coeffs_bigint = coeffs
-                        .into_iter()
-                        .map(ark_ff::PrimeField::into_bigint)
-                        .collect::<Vec<_>>();
-                    G::Group::msm_bigint(&bases, &coeffs_bigint)
-                })
-                .reduce(G::Group::zero, |mut l, r| {
-                    l += r;
-                    l
-                })
-
-            // #[cfg(not(feature = "parallel"))]
-            // {
-            //     println!("not parallel msm");
-            //     let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
-            //     G::Group::msm_bigint(&points, &scalars_bigint)
-            // }
+            #[cfg(not(target_os = "zkvm"))]
+            {
+                let chunk_size = points.len() / 2;
+                points
+                    .into_par_iter()
+                    .chunks(chunk_size)
+                    .zip(scalars.into_par_iter().chunks(chunk_size))
+                    .map(|(bases, coeffs)| {
+                        let coeffs_bigint = coeffs
+                            .into_iter()
+                            .map(ark_ff::PrimeField::into_bigint)
+                            .collect::<Vec<_>>();
+                        G::Group::msm_bigint(&bases, &coeffs_bigint)
+                    })
+                    .reduce(G::Group::zero, |mut l, r| {
+                        l += r;
+                        l
+                    })
+            }
+            #[cfg(target_os = "zkvm")]
+            {
+                let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
+                G::Group::msm_bigint(&points, &scalars_bigint)
+            }
         };
 
         println!("cycle-tracker-end: ipa_final_msm");
