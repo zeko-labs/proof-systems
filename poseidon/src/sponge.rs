@@ -12,7 +12,7 @@ use ark_ff::{BigInteger, Field, One, PrimeField, Zero};
 #[inline(always)]
 fn cycle_tracker_start_if_needed(in_flight: &mut bool) {
     if !*in_flight {
-        println!("cycle-tracker-start: poseidon_hash");
+        std::println!("cycle-tracker-start: poseidon_hash");
         *in_flight = true;
     }
 }
@@ -21,7 +21,7 @@ fn cycle_tracker_start_if_needed(in_flight: &mut bool) {
 #[inline(always)]
 fn cycle_tracker_end_if_needed(in_flight: &mut bool) {
     if *in_flight {
-        println!("cycle-tracker-end: poseidon_hash");
+        std::println!("cycle-tracker-end: poseidon_hash");
         *in_flight = false;
     }
 }
