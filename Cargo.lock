@@ -219,7 +219,7 @@ dependencies = [
 [[package]]
 name = "ark-ec"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#a3d0c19e0a2b18941eecdd3915cb4f9ddc6624c0"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
 dependencies = [
  "ahash",
  "ark-ff 0.5.0",
@@ -234,6 +234,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "rayon",
+ "sp1-lib",
  "zeroize",
 ]
 
@@ -260,7 +261,7 @@ dependencies = [
 [[package]]
 name = "ark-ff"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#a3d0c19e0a2b18941eecdd3915cb4f9ddc6624c0"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
 dependencies = [
  "ark-ff-asm 0.5.0",
  "ark-ff-macros 0.5.0",
@@ -291,7 +292,7 @@ dependencies = [
 [[package]]
 name = "ark-ff-asm"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#a3d0c19e0a2b18941eecdd3915cb4f9ddc6624c0"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
 dependencies = [
  "quote",
  "syn 2.0.117",
@@ -313,7 +314,7 @@ dependencies = [
 [[package]]
 name = "ark-ff-macros"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#a3d0c19e0a2b18941eecdd3915cb4f9ddc6624c0"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
 dependencies = [
  "num-bigint 0.4.6",
  "num-traits",
@@ -325,7 +326,7 @@ dependencies = [
 [[package]]
 name = "ark-poly"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#a3d0c19e0a2b18941eecdd3915cb4f9ddc6624c0"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
 dependencies = [
  "ahash",
  "ark-ff 0.5.0",
@@ -351,7 +352,7 @@ dependencies = [
 [[package]]
 name = "ark-serialize"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#a3d0c19e0a2b18941eecdd3915cb4f9ddc6624c0"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
 dependencies = [
  "ark-serialize-derive",
  "ark-std 0.5.0",
@@ -364,7 +365,7 @@ dependencies = [
 [[package]]
 name = "ark-serialize-derive"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#a3d0c19e0a2b18941eecdd3915cb4f9ddc6624c0"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4025,13 +4026,13 @@ dependencies = [
 
 [[package]]
 name = "rkyv"
-version = "0.8.15"
+version = "0.8.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a30e631b7f4a03dee9056b8ef6982e8ba371dd5bedb74d3ec86df4499132c70"
+checksum = "73389e0c99e664f919275ab5b5b0471391fe9a8de61e1dff9b1eaf56a90f16e3"
 dependencies = [
  "bytecheck",
  "bytes",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.0",
  "indexmap 2.14.0",
  "munge",
  "ptr_meta",
@@ -4044,9 +4045,9 @@ dependencies = [
 
 [[package]]
 name = "rkyv_derive"
-version = "0.8.15"
+version = "0.8.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8100bb34c0a1d0f907143db3149e6b4eea3c33b9ee8b189720168e818303986f"
+checksum = "5d2ed0b54125315fb36bd021e82d314d1c126548f871634b483f46b31d13cac6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4121,9 +4122,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.38"
+version = "0.23.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69f9466fb2c14ea04357e91413efb882e2a6d4a406e625449bc0a5d360d53a21"
+checksum = "7c2c118cb077cca2822033836dfb1b975355dfb784b5e8da48f7b6c5db74e60e"
 dependencies = [
  "log",
  "once_cell",

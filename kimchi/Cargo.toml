@@ -96,6 +96,7 @@ ocaml_types = [
   "mina-poseidon/ocaml_types",
   "internal-tracing/ocaml_types",
 ]
+debug-log = ["mina-poseidon/debug-log"]
 bn254 = ["ark-bn254"]
 wasm_types = ["wasm-bindgen"]
 check_feature_flags = []

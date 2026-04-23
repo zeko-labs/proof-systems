@@ -52,6 +52,7 @@ fn kimchi_proof() {
 
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
 
+    mina_poseidon::permutation::reset_poseidon_permutation_count();
     // ------------------------------------------------------------------
     // SRS — exactement comme main.rs dans sp1-verifier
     // ------------------------------------------------------------------
@@ -157,6 +158,7 @@ fn kimchi_proof() {
         &public_inputs,
     );
 
+    mina_poseidon::permutation::log_poseidon_permutation_count("kimchi_proof");
     match result {
         Ok(_) => {}
         Err(e) => panic!("verify failed: {:?}", e),
