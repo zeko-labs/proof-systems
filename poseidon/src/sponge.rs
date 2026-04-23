@@ -2,40 +2,11 @@ extern crate alloc;
 
 use crate::{
     constants::{PlonkSpongeConstantsKimchi, SpongeConstants},
-    permutation::poseidon_permutation_count,
     poseidon::{ArithmeticSponge, ArithmeticSpongeParams, Sponge},
 };
 use alloc::{vec, vec::Vec};
 use ark_ec::models::short_weierstrass::{Affine, SWCurveConfig};
 use ark_ff::{BigInteger, Field, One, PrimeField, Zero};
-
-#[cfg(target_os = "zkvm")]
-use std::println;
-
-#[cfg(target_os = "zkvm")]
-#[inline(always)]
-fn cycle_tracker_start_if_needed(in_flight: &mut bool, perm_start: &mut u64) {
-    if !*in_flight {
-        println!("cycle-tracker-start: poseidon_hash");
-        *perm_start = poseidon_permutation_count();
-        *in_flight = true;
-    }
-}
-
-#[cfg(target_os = "zkvm")]
-#[inline(always)]
-fn cycle_tracker_end_if_needed(in_flight: &mut bool, perm_start: &mut u64) {
-    if *in_flight {
-        let perm_end = poseidon_permutation_count();
-        println!(
-            "poseidon_hash permutations: {}",
-            perm_end.saturating_sub(*perm_start)
-        );
-        println!("cycle-tracker-end: poseidon_hash");
-        *in_flight = false;
-        *perm_start = 0;
-    }
-}
 
 /// Abstracts a sponge operating on a base field `Fq` of the curve
 /// `G`. The parameter `Fr` models the scalar field of the curve.
@@ -123,19 +94,11 @@ impl<F: PrimeField> ScalarChallenge<F> {
 pub struct DefaultFqSponge<P: SWCurveConfig, SC: SpongeConstants, const FULL_ROUNDS: usize> {
     pub sponge: ArithmeticSponge<P::BaseField, SC, FULL_ROUNDS>,
     pub last_squeezed: Vec<u64>,
-    #[cfg(target_os = "zkvm")]
-    pub cycle_tracker_in_flight: bool,
-    #[cfg(target_os = "zkvm")]
-    pub permutation_count_at_start: u64,
 }
 
 pub struct DefaultFrSponge<Fr: Field, SC: SpongeConstants, const FULL_ROUNDS: usize> {
     pub sponge: ArithmeticSponge<Fr, SC, FULL_ROUNDS>,
     pub last_squeezed: Vec<u64>,
-    #[cfg(target_os = "zkvm")]
-    pub cycle_tracker_in_flight: bool,
-    #[cfg(target_os = "zkvm")]
-    pub permutation_count_at_start: u64,
 }
 
 impl<const FULL_ROUNDS: usize, Fr> From<&'static ArithmeticSpongeParams<Fr, FULL_ROUNDS>>
@@ -147,10 +110,6 @@ where
         DefaultFrSponge {
             sponge: ArithmeticSponge::new(p),
             last_squeezed: vec![],
-            #[cfg(target_os = "zkvm")]
-            cycle_tracker_in_flight: false,
-            #[cfg(target_os = "zkvm")]
-            permutation_count_at_start: 0,
         }
     }
 }
@@ -176,12 +135,6 @@ impl<Fr: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
         } else {
             let x = self.sponge.squeeze().into_bigint();
 
-            #[cfg(target_os = "zkvm")]
-            cycle_tracker_end_if_needed(
-                &mut self.cycle_tracker_in_flight,
-                &mut self.permutation_count_at_start,
-            );
-
             self.last_squeezed
                 .extend(&x.as_ref()[0..HIGH_ENTROPY_LIMBS]);
             self.squeeze(num_limbs)
@@ -204,12 +157,6 @@ where
         } else {
             let x = self.sponge.squeeze().into_bigint();
 
-            #[cfg(target_os = "zkvm")]
-            cycle_tracker_end_if_needed(
-                &mut self.cycle_tracker_in_flight,
-                &mut self.permutation_count_at_start,
-            );
-
             self.last_squeezed
                 .extend(&x.as_ref()[0..HIGH_ENTROPY_LIMBS]);
             self.squeeze_limbs(num_limbs)
@@ -219,12 +166,6 @@ where
     pub fn squeeze_field(&mut self) -> P::BaseField {
         self.last_squeezed = vec![];
         let out = self.sponge.squeeze();
-
-        #[cfg(target_os = "zkvm")]
-        cycle_tracker_end_if_needed(
-            &mut self.cycle_tracker_in_flight,
-            &mut self.permutation_count_at_start,
-        );
 
         out
     }
@@ -247,20 +188,10 @@ where
         DefaultFqSponge {
             sponge,
             last_squeezed: vec![],
-            #[cfg(target_os = "zkvm")]
-            cycle_tracker_in_flight: false,
-            #[cfg(target_os = "zkvm")]
-            permutation_count_at_start: 0,
         }
     }
 
     fn absorb_g(&mut self, g: &[Affine<P>]) {
-        #[cfg(target_os = "zkvm")]
-        cycle_tracker_start_if_needed(
-            &mut self.cycle_tracker_in_flight,
-            &mut self.permutation_count_at_start,
-        );
-
         self.last_squeezed = vec![];
         for g in g.iter() {
             if g.infinity {
@@ -276,12 +207,6 @@ where
     }
 
     fn absorb_fq(&mut self, x: &[P::BaseField]) {
-        #[cfg(target_os = "zkvm")]
-        cycle_tracker_start_if_needed(
-            &mut self.cycle_tracker_in_flight,
-            &mut self.permutation_count_at_start,
-        );
-
         self.last_squeezed = vec![];
 
         for fe in x {
@@ -290,12 +215,6 @@ where
     }
 
     fn absorb_fr(&mut self, x: &[P::ScalarField]) {
-        #[cfg(target_os = "zkvm")]
-        cycle_tracker_start_if_needed(
-            &mut self.cycle_tracker_in_flight,
-            &mut self.permutation_count_at_start,
-        );
-
         self.last_squeezed = vec![];
 
         x.iter().for_each(|x| {
