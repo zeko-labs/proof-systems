@@ -30,6 +30,9 @@ extern crate alloc;
 #[cfg(feature = "debug-log")]
 extern crate std;
 
+#[cfg(target_os = "zkvm")]
+extern crate std;
+
 pub mod constants;
 pub mod dummy_values;
 pub mod pasta;
