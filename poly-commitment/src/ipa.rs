@@ -10,11 +10,10 @@ use crate::{
     },
     error::CommitmentError,
     hash_map_cache::HashMapCache,
-    sp1_msm,
     utils::combine_polys,
     BlindedCommitment, PolyComm, PolynomialsToCombine, SRS as SRSTrait,
 };
-use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
+use ark_ec::{AdditiveGroup, AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{BigInteger, Field, One, PrimeField, UniformRand, Zero};
 use ark_poly::{
     univariate::DensePolynomial, EvaluationDomain, Evaluations, Radix2EvaluationDomain as D,
@@ -31,8 +30,6 @@ use rand::{CryptoRng, RngCore};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::fs::File;
-use std::io::Write;
 use std::{cmp::min, iter::Iterator, ops::AddAssign};
 
 #[serde_as]
@@ -44,13 +41,11 @@ pub struct SRS<G> {
     #[serde_as(as = "Vec<o1_utils::serialization::SerdeAs>")]
     pub g: Vec<G>,
 
-    /// A group element used for blinding commitments
+    /// A group element used for blinding commitments.
     #[serde_as(as = "o1_utils::serialization::SerdeAs")]
     pub h: G,
 
-    // TODO: the following field should be separated, as they are optimization
-    // values
-    /// Commitments to Lagrange bases, per domain size
+    /// Commitments to Lagrange bases, per domain size.
     #[serde(skip)]
     pub lagrange_bases: HashMapCache<usize, Vec<PolyComm<G>>>,
 }
@@ -62,6 +57,44 @@ where
     fn eq(&self, other: &Self) -> bool {
         self.g == other.g && self.h == other.h
     }
+}
+
+#[inline(always)]
+fn choose_fixed_msm_window(num_bases: usize) -> usize {
+    match num_bases {
+        0..=32 => 4,
+        33..=128 => 6,
+        129..=512 => 8,
+        513..=2048 => 10,
+        2049..=8192 => 12,
+        8193..=32768 => 13,
+        _ => 14,
+    }
+}
+
+#[inline(always)]
+fn scalar_num_bits<F: PrimeField>() -> usize {
+    F::MODULUS_BIT_SIZE as usize
+}
+
+#[inline(always)]
+fn extract_window_u64(limbs: &[u64], bit_offset: usize, width: usize) -> usize {
+    let limb_idx = bit_offset / 64;
+    let bit_idx = bit_offset % 64;
+
+    if limb_idx >= limbs.len() {
+        return 0;
+    }
+
+    let lo = limbs[limb_idx] >> bit_idx;
+    let hi = if bit_idx > 0 && limb_idx + 1 < limbs.len() {
+        limbs[limb_idx + 1] << (64 - bit_idx)
+    } else {
+        0
+    };
+
+    let mask = (1usize << width) - 1;
+    ((lo | hi) as usize) & mask
 }
 
 pub fn endos<G: CommitmentCurve>() -> (G::BaseField, G::ScalarField)
@@ -87,7 +120,7 @@ fn point_of_random_bytes<G: CommitmentCurve>(map: &G::Map, random_bytes: &[u8]) 
 where
     G::BaseField: Field,
 {
-    // packing in bit-representation
+    // Pack in bit representation.
     const N: usize = 31;
     let extension_degree = G::BaseField::extension_degree() as usize;
 
@@ -115,11 +148,78 @@ where
     G::of_coordinates(x, y).mul_by_cofactor()
 }
 
-/// Additional methods for the SRS structure
+impl<G: CommitmentCurve> SRS<G>
+where
+    G::ScalarField: PrimeField,
+{
+    pub fn fixed_bases_with_h(&self, padding: usize) -> Vec<G> {
+        let mut bases = Vec::with_capacity(self.g.len() + 1 + padding);
+        bases.push(self.h);
+        bases.extend(self.g.iter().copied());
+        bases.extend(std::iter::repeat(G::zero()).take(padding));
+        bases
+    }
+
+    pub fn fixed_base_msm(
+        &self,
+        fixed_bases: &[G],
+        scalars: &[G::ScalarField],
+        window_bits: usize,
+    ) -> G::Group {
+        assert_eq!(fixed_bases.len(), scalars.len());
+
+        if fixed_bases.is_empty() {
+            return G::Group::zero();
+        }
+
+        let scalar_bits = scalar_num_bits::<G::ScalarField>();
+        let num_windows = scalar_bits.div_ceil(window_bits);
+        let bucket_count = (1usize << window_bits) - 1;
+
+        let scalar_bigints: Vec<_> = scalars.iter().map(|s| s.into_bigint()).collect();
+
+        let mut result = G::Group::zero();
+
+        for window_idx in (0..num_windows).rev() {
+            for _ in 0..window_bits {
+                result.double_in_place();
+            }
+
+            let bit_offset = window_idx * window_bits;
+            let mut buckets = vec![G::Group::zero(); bucket_count + 1];
+
+            for (base_idx, base) in fixed_bases.iter().enumerate() {
+                if base.is_zero() {
+                    continue;
+                }
+
+                let bigint = &scalar_bigints[base_idx];
+                let digit = extract_window_u64(bigint.as_ref(), bit_offset, window_bits);
+
+                if digit != 0 {
+                    buckets[digit] += base.into_group();
+                }
+            }
+
+            let mut running = G::Group::zero();
+            let mut window_sum = G::Group::zero();
+
+            for digit in (1..=bucket_count).rev() {
+                running += buckets[digit];
+                window_sum += running;
+            }
+
+            result += window_sum;
+        }
+
+        result
+    }
+}
+
+/// Additional methods for the SRS structure.
 impl<G: CommitmentCurve> SRS<G> {
-    /// This function verifies a batch of polynomial commitment opening proofs.
-    /// Return `true` if the verification is successful, `false` otherwise.
-    /// Additional methods for the SRS structure
+    /// Verify a batch of polynomial commitment opening proofs.
+    /// Return `true` if verification succeeds, `false` otherwise.
     pub fn verify<EFqSponge, RNG, const FULL_ROUNDS: usize>(
         &self,
         group_map: &G::Map,
@@ -143,10 +243,7 @@ impl<G: CommitmentCurve> SRS<G> {
         let padding = padded_length - nonzero_length;
 
         // Fixed-base MSM inputs: H + SRS G vector + padding.
-        let mut fixed_points = vec![self.h];
-        fixed_points.extend(self.g.clone());
-        fixed_points.extend(vec![G::zero(); padding]);
-
+        let fixed_points = self.fixed_bases_with_h(padding);
         let mut fixed_scalars = vec![G::ScalarField::zero(); padded_length + 1];
         assert_eq!(fixed_scalars.len(), fixed_points.len());
 
@@ -161,16 +258,15 @@ impl<G: CommitmentCurve> SRS<G> {
 
         #[cfg(target_os = "zkvm")]
         println!(
-        "ipa_verify_setup: batch={} srs_g_len={} padded_length={} max_rounds={} fixed_points={} fixed_scalars={}",
-        batch.len(),
-        self.g.len(),
-        padded_length,
-        max_rounds,
-        fixed_points.len(),
-        fixed_scalars.len(),
-    );
+            "ipa_verify_setup: batch={} srs_g_len={} padded_length={} max_rounds={} fixed_points={} fixed_scalars={}",
+            batch.len(),
+            self.g.len(),
+            padded_length,
+            max_rounds,
+            fixed_points.len(),
+            fixed_scalars.len(),
+        );
 
-        // Stage 1 — build fixed and dynamic scalar/point vectors.
         println!("cycle-tracker-start: ipa_build_vectors");
 
         for BatchEvaluationProof {
@@ -183,7 +279,9 @@ impl<G: CommitmentCurve> SRS<G> {
             combined_inner_product,
         } in batch.iter_mut()
         {
+            #[cfg(target_os = "zkvm")]
             let dynamic_points_before = dynamic_points.len();
+            #[cfg(target_os = "zkvm")]
             let dynamic_scalars_before = dynamic_scalars.len();
 
             #[cfg(target_os = "zkvm")]
@@ -291,11 +389,11 @@ impl<G: CommitmentCurve> SRS<G> {
 
             #[cfg(target_os = "zkvm")]
             println!(
-            "ipa_batch_item_after_combine_commitments: dynamic_points={} dynamic_scalars={} evals={}",
-            dynamic_points.len(),
-            dynamic_scalars.len(),
-            evaluations.len(),
-        );
+                "ipa_batch_item_after_combine_commitments: dynamic_points={} dynamic_scalars={} evals={}",
+                dynamic_points.len(),
+                dynamic_scalars.len(),
+                evaluations.len(),
+            );
 
             dynamic_scalars.push(rand_base_i_c_i * *combined_inner_product);
             dynamic_points.push(u_base);
@@ -304,12 +402,12 @@ impl<G: CommitmentCurve> SRS<G> {
 
             #[cfg(target_os = "zkvm")]
             println!(
-            "ipa_batch_item_contrib: added_dynamic_points={} added_dynamic_scalars={} final_dynamic_points={} final_dynamic_scalars={}",
-            dynamic_points.len() - dynamic_points_before,
-            dynamic_scalars.len() - dynamic_scalars_before,
-            dynamic_points.len(),
-            dynamic_scalars.len(),
-        );
+                "ipa_batch_item_contrib: added_dynamic_points={} added_dynamic_scalars={} final_dynamic_points={} final_dynamic_scalars={}",
+                dynamic_points.len() - dynamic_points_before,
+                dynamic_scalars.len() - dynamic_scalars_before,
+                dynamic_points.len(),
+                dynamic_scalars.len(),
+            );
 
             rand_base_i *= &rand_base;
             sg_rand_base_i *= &sg_rand_base;
@@ -372,13 +470,15 @@ impl<G: CommitmentCurve> SRS<G> {
             }
             #[cfg(target_os = "zkvm")]
             {
-                if fixed_points.is_empty() {
-                    G::Group::zero()
-                } else {
-                    let fixed_scalars_bigint: Vec<_> =
-                        fixed_scalars.iter().map(|x| x.into_bigint()).collect();
-                    G::Group::msm_bigint(&fixed_points, &fixed_scalars_bigint)
-                }
+                let window_bits = choose_fixed_msm_window(fixed_points.len());
+
+                println!(
+                    "ipa_fixed_msm config: points={} window_bits={}",
+                    fixed_points.len(),
+                    window_bits,
+                );
+
+                self.fixed_base_msm(&fixed_points, &fixed_scalars, window_bits)
             }
         };
         println!("cycle-tracker-end: ipa_fixed_msm");
@@ -427,7 +527,7 @@ impl<G: CommitmentCurve> SRS<G> {
         msm_res == G::Group::zero()
     }
 
-    /// This function creates a trusted-setup SRS instance for circuits with
+    /// Create a trusted-setup SRS instance for circuits with
     /// number of rows up to `depth`.
     ///
     /// # Safety
@@ -446,12 +546,11 @@ impl<G: CommitmentCurve> SRS<G> {
             })
             .collect();
 
-        // Compute a blinder
+        // Compute a blinder.
         let h = {
             let mut h = Blake2b512::new();
             h.update("srs_misc".as_bytes());
-            // FIXME: This is for retrocompatibility with a previous version
-            // that was using a list initialisation. It is not necessary.
+            // This is kept for retrocompatibility with a previous version.
             h.update(0_u32.to_be_bytes());
             point_of_random_bytes(&m, &h.finalize())
         };
@@ -469,7 +568,7 @@ where
     <G as CommitmentCurve>::Map: Sync,
     G::BaseField: PrimeField,
 {
-    /// This function creates SRS instance for circuits with number of rows up
+    /// Create an SRS instance for circuits with number of rows up
     /// to `depth`.
     pub fn create_parallel(depth: usize) -> Self {
         let m = G::Map::setup();
@@ -483,12 +582,11 @@ where
             })
             .collect();
 
-        // Compute a blinder
+        // Compute a blinder.
         let h = {
             let mut h = Blake2b512::new();
             h.update("srs_misc".as_bytes());
-            // FIXME: This is for retrocompatibility with a previous version
-            // that was using a list initialisation. It is not necessary.
+            // This is kept for retrocompatibility with a previous version.
             h.update(0_u32.to_be_bytes());
             point_of_random_bytes(&m, &h.finalize())
         };
@@ -505,7 +603,7 @@ impl<G> SRSTrait<G> for SRS<G>
 where
     G: CommitmentCurve,
 {
-    /// The maximum polynomial degree that can be committed to
+    /// The maximum polynomial degree that can be committed to.
     fn max_poly_size(&self) -> usize {
         self.g.len()
     }
@@ -514,9 +612,8 @@ where
         self.h
     }
 
-    /// Turns a non-hiding polynomial commitment into a hiding polynomial
-    /// commitment. Transforms each given `<a, G>` into `(<a, G> + wH, w)` with
-    /// a random `w` per commitment.
+    /// Turn a non-hiding polynomial commitment into a hiding polynomial
+    /// commitment.
     fn mask(
         &self,
         comm: PolyComm<G>,
@@ -552,7 +649,7 @@ where
     ) -> PolyComm<G> {
         let is_zero = plnm.is_zero();
 
-        // chunk while committing
+        // Chunk while committing.
         let mut chunks: Vec<_> = if is_zero {
             vec![G::zero()]
         } else if plnm.len() < self.g.len() {
@@ -560,9 +657,8 @@ where
                 .unwrap()
                 .into_affine()]
         } else if plnm.len() == self.g.len() {
-            // when processing a single chunk, it's faster to parallelise
-            // vertically in 2 threads (see the comment to the
-            // `benchmark_msm_parallel_vesta` MSM benchmark)
+            // When processing a single chunk, it is faster to parallelize
+            // vertically in 2 threads.
             let n = self.g.len();
             let (r1, r2) = rayon::join(
                 || G::Group::msm(&self.g[..n / 2], &plnm.coeffs[..n / 2]).unwrap(),
@@ -571,7 +667,7 @@ where
 
             vec![(r1 + r2).into_affine()]
         } else {
-            // otherwise it's better to parallelise horizontally along chunks
+            // Otherwise it is better to parallelize horizontally along chunks.
             plnm.into_par_iter()
                 .chunks(self.g.len())
                 .map(|chunk| {
@@ -627,7 +723,11 @@ where
             }
             std::cmp::Ordering::Equal => commit_evaluations(&plnm.evals, basis),
             std::cmp::Ordering::Greater => {
-                panic!("desired commitment domain size ({}) greater than evaluations' domain size ({}):", domain.size, plnm.domain().size)
+                panic!(
+                    "desired commitment domain size ({}) greater than evaluations' domain size ({}):",
+                    domain.size,
+                    plnm.domain().size
+                )
             }
         }
     }
@@ -661,12 +761,11 @@ where
             })
             .collect();
 
-        // Compute a blinder
+        // Compute a blinder.
         let h = {
             let mut h = Blake2b512::new();
             h.update("srs_misc".as_bytes());
-            // FIXME: This is for retrocompatibility with a previous version
-            // that was using a list initialisation. It is not necessary.
+            // This is kept for retrocompatibility with a previous version.
             h.update(0_u32.to_be_bytes());
             point_of_random_bytes(&m, &h.finalize())
         };
@@ -697,9 +796,8 @@ where
 impl<G: CommitmentCurve> SRS<G> {
     #[allow(clippy::type_complexity)]
     #[allow(clippy::many_single_char_names)]
-    // NB: a slight modification to the original protocol is done when absorbing
-    // the first prover message to improve the efficiency in a recursive
-    // setting.
+    // A slight modification to the original protocol is done when absorbing
+    // the first prover message to improve efficiency in a recursive setting.
     pub fn open<EFqSponge, RNG, D: EvaluationDomain<G::ScalarField>, const FULL_ROUNDS: usize>(
         &self,
         group_map: &G::Map,
@@ -721,40 +819,17 @@ impl<G: CommitmentCurve> SRS<G> {
         let rounds = math::ceil_log2(self.g.len());
         let padded_length = 1 << rounds;
 
-        // TODO: Trim this to the degree of the largest polynomial
-        // TODO: We do always suppose we have a power of 2 for the SRS in
-        // practice. Therefore, padding equals zero, and this code can be
-        // removed. Only a current test case uses a SRS with a non-power of 2.
+        // We usually have a power-of-two SRS, so padding is zero in practice.
         let padding = padded_length - self.g.len();
         let mut g = self.g.clone();
         g.extend(vec![G::zero(); padding]);
 
-        // Combines polynomials roughly as follows: p(X) := ∑_i polyscale^i p_i(X)
-        //
-        // `blinding_factor` is a combined set of commitments that are
-        // paired with polynomials in `plnms`. In kimchi, these input
-        // commitments are poly com blinders, so often `[G::ScalarField::one();
-        // num_chunks]` or zeroes.
+        // Combine polynomials roughly as:
+        // p(X) := Σ_i polyscale^i p_i(X)
         let (p, blinding_factor) = combine_polys::<G, D>(plnms, polyscale, self.g.len());
 
-        // The initial evaluation vector for polynomial commitment b_init is not
-        // just the powers of a single point as in the original IPA
-        // (1,ζ,ζ^2,...)
-        //
-        // but rather a vector of linearly combined powers with `evalscale` as
-        // recombiner.
-        //
-        // b_init[j] = Σ_i evalscale^i elm_i^j
-        //           = ζ^j + evalscale * ζ^j ω^j (in the specific case of challenges (ζ,ζω))
-        //
-        // So in our case b_init is the following vector:
-        //    1 + evalscale
-        //    ζ + evalscale * ζ ω
-        //    ζ^2 + evalscale * (ζ ω)^2
-        //    ζ^3 + evalscale * (ζ ω)^3
-        //    ...
+        // Build the combined evaluation vector.
         let b_init = {
-            // randomise/scale the eval powers
             let mut scale = G::ScalarField::one();
             let mut res: Vec<G::ScalarField> =
                 (0..padded_length).map(|_| G::ScalarField::zero()).collect();
@@ -767,7 +842,6 @@ impl<G: CommitmentCurve> SRS<G> {
             res
         };
 
-        // Combined polynomial p(X) evaluated at the combined eval point b_init.
         let combined_inner_product = p
             .coeffs
             .iter()
@@ -775,17 +849,9 @@ impl<G: CommitmentCurve> SRS<G> {
             .map(|(a, b)| *a * b)
             .fold(G::ScalarField::zero(), |acc, x| acc + x);
 
-        // Usually, the prover sends `combined_inner_product`` to the verifier
-        // So we should absorb `combined_inner_product``
-        // However it is more efficient in the recursion circuit
-        // to absorb a slightly modified version of it.
-        // As a reminder, in a recursive setting, the challenges are given as a
-        // public input and verified in the next iteration.
-        // See the `shift_scalar`` doc.
         sponge.absorb_fr(&[shift_scalar::<G>(combined_inner_product)]);
 
-        // Generate another randomisation base U; our commitments will be w.r.t
-        // bases {G_i},H,U.
+        // Generate another randomization base U.
         let u_base: G = {
             let t = sponge.challenge_fq();
             let (x, y) = group_map.to_group(t);
@@ -799,27 +865,20 @@ impl<G: CommitmentCurve> SRS<G> {
         let mut b = b_init;
 
         let mut lr = vec![];
-
         let mut blinders = vec![];
-
         let mut chals = vec![];
         let mut chal_invs = vec![];
 
-        // The main IPA folding loop that has log iterations.
+        // Main IPA folding loop with logarithmic number of rounds.
         for _ in 0..rounds {
             let n = g.len() / 2;
-            // Pedersen bases
             let (g_lo, g_hi) = (&g[0..n], &g[n..]);
-            // Polynomial coefficients
             let (a_lo, a_hi) = (&a[0..n], &a[n..]);
-            // Evaluation points
             let (b_lo, b_hi) = (&b[0..n], &b[n..]);
 
-            // Blinders for L/R
             let rand_l = <G::ScalarField as UniformRand>::rand(rng);
             let rand_r = <G::ScalarField as UniformRand>::rand(rng);
 
-            // Pedersen commitment to a_lo,rand_l,<a_hi,b_lo>
             let l = G::Group::msm_bigint(
                 &[g_lo, &[self.h, u_base]].concat(),
                 &[a_hi, &[rand_l, inner_prod(a_hi, b_lo)]]
@@ -846,9 +905,6 @@ impl<G: CommitmentCurve> SRS<G> {
             sponge.absorb_g(&[l]);
             sponge.absorb_g(&[r]);
 
-            // Round #i challenges;
-            // - not to be confused with "u_base"
-            // - not to be confused with "u" as "polyscale"
             let u_pre = squeeze_prechallenge(&mut sponge);
             let u = u_pre.to_field(&endo_r);
             let u_inv = u.inverse().unwrap();
@@ -856,12 +912,10 @@ impl<G: CommitmentCurve> SRS<G> {
             chals.push(u);
             chal_invs.push(u_inv);
 
-            // IPA-folding polynomial coefficients
             a = a_hi
                 .par_iter()
                 .zip(a_lo)
                 .map(|(&hi, &lo)| {
-                    // lo + u_inv * hi
                     let mut res = hi;
                     res *= u_inv;
                     res += &lo;
@@ -869,12 +923,10 @@ impl<G: CommitmentCurve> SRS<G> {
                 })
                 .collect();
 
-            // IPA-folding evaluation points
             b = b_lo
                 .par_iter()
                 .zip(b_hi)
                 .map(|(&lo, &hi)| {
-                    // lo + u * hi
                     let mut res = hi;
                     res *= u;
                     res += &lo;
@@ -882,7 +934,6 @@ impl<G: CommitmentCurve> SRS<G> {
                 })
                 .collect();
 
-            // IPA-folding bases
             g = G::combine_one_endo(endo_r, endo_q, g_lo, g_hi, u_pre);
         }
 
@@ -890,19 +941,11 @@ impl<G: CommitmentCurve> SRS<G> {
             g.len() == 1 && a.len() == 1 && b.len() == 1,
             "IPA commitment folding must produce single elements after log rounds"
         );
+
         let a0 = a[0];
         let b0 = b[0];
         let g0 = g[0];
 
-        // Compute r_prime, a folded blinder. It combines blinders on
-        // each individual step of the IPA folding process together
-        // with the final blinding_factor of the polynomial.
-        //
-        // r_prime := ∑_i (rand_l[i] * u[i]^{-1} + rand_r * u[i])
-        //          + blinding_factor
-        //
-        // where u is a vector of folding challenges, and rand_l/rand_r are
-        // intermediate L/R blinders.
         let r_prime = blinders
             .iter()
             .zip(chals.iter().zip(chal_invs.iter()))
@@ -912,10 +955,6 @@ impl<G: CommitmentCurve> SRS<G> {
         let d = <G::ScalarField as UniformRand>::rand(rng);
         let r_delta = <G::ScalarField as UniformRand>::rand(rng);
 
-        // Compute delta, the commitment
-        // delta = [d] G0 + \
-        //         [b0*d] U_base + \
-        //         [r_delta] H^r (as a group element, in additive notation)
         let delta = ((g0.into_group() + (u_base.mul(b0))).into_affine().mul(d)
             + self.h.mul(r_delta))
         .into_affine();
@@ -923,7 +962,6 @@ impl<G: CommitmentCurve> SRS<G> {
         sponge.absorb_g(&[delta]);
         let c = ScalarChallenge(sponge.challenge()).to_field(&endo_r);
 
-        // (?) Schnorr-like responses showing the knowledge of r_prime and a0.
         let z1 = a0 * c + d;
         let z2 = r_prime * c + r_delta;
 
@@ -939,102 +977,18 @@ impl<G: CommitmentCurve> SRS<G> {
     fn lagrange_basis(&self, domain: D<G::ScalarField>) -> Vec<PolyComm<G>> {
         let n = domain.size();
 
-        // Let V be a vector space over the field F.
-        //
-        // Given
-        // - a domain [ 1, w, w^2, ..., w^{n - 1} ]
-        // - a vector v := [ v_0, ..., v_{n - 1} ] in V^n
-        //
-        // the FFT algorithm computes the matrix application
-        //
-        // u = M(w) * v
-        //
-        // where
-        // M(w) =
-        //   1 1       1           ... 1
-        //   1 w       w^2         ... w^{n-1}
-        //   ...
-        //   1 w^{n-1} (w^2)^{n-1} ... (w^{n-1})^{n-1}
-        //
-        // The IFFT algorithm computes
-        //
-        // v = M(w)^{-1} * u
-        //
-        // Let's see how we can use this algorithm to compute the lagrange basis
-        // commitments.
-        //
-        // Let V be the vector space F[x] of polynomials in x over F.
-        // Let v in V be the vector [ L_0, ..., L_{n - 1} ] where L_i is the i^{th}
-        // normalized Lagrange polynomial (where L_i(w^j) = j == i ? 1 : 0).
-        //
-        // Consider the rows of M(w) * v. Let me write out the matrix and vector
-        // so you can see more easily.
-        //
-        //   | 1 1       1           ... 1               |   | L_0     |
-        //   | 1 w       w^2         ... w^{n-1}         | * | L_1     |
-        //   | ...                                       |   | ...     |
-        //   | 1 w^{n-1} (w^2)^{n-1} ... (w^{n-1})^{n-1} |   | L_{n-1} |
-        //
-        // The 0th row is L_0 + L1 + ... + L_{n - 1}. So, it's the polynomial
-        // that has the value 1 on every element of the domain.
-        // In other words, it's the polynomial 1.
-        //
-        // The 1st row is L_0 + w L_1 + ... + w^{n - 1} L_{n - 1}. So, it's the
-        // polynomial which has value w^i on w^i.
-        // In other words, it's the polynomial x.
-        //
-        // In general, you can see that row i is in fact the polynomial x^i.
-        //
-        // Thus, M(w) * v is the vector u, where u = [ 1, x, x^2, ..., x^n ]
-        //
-        // Therefore, the IFFT algorithm, when applied to the vector u (the
-        // standard monomial basis) will yield the vector v of the (normalized)
-        // Lagrange polynomials.
-        //
-        // Now, because the polynomial commitment scheme is additively
-        // homomorphic, and because the commitment to the polynomial x^i is just
-        // self.g[i], we can obtain commitments to the normalized Lagrange
-        // polynomials by applying IFFT to the vector self.g[0..n].
-        //
-        //
-        // Further still, we can do the same trick for 'chunked' polynomials.
-        //
-        // Recall that a chunked polynomial is some f of degree k*n - 1 with
-        // f(x) = f_0(x) + x^n f_1(x) + ... + x^{(k-1) n} f_{k-1}(x)
-        // where each f_i has degree n-1.
-        //
-        // In the above, if we set u = [ 1, x^2, ... x^{n-1}, 0, 0, .., 0 ]
-        // then we effectively 'zero out' any polynomial terms higher than
-        // x^{n-1}, leaving us with the 'partial Lagrange polynomials' that
-        // contribute to f_0.
-        //
-        // Similarly, u = [ 0, 0, ..., 0, 1, x^2, ..., x^{n-1}, 0, 0, ..., 0]
-        // with n leading zeros 'zeroes out' all terms except the 'partial
-        // Lagrange polynomials' that contribute to f_1, and likewise for each
-        // f_i.
-        //
-        // By computing each of these, and recollecting the terms as a vector of
-        // polynomial commitments, we obtain a chunked commitment to the L_i
-        // polynomials.
         let srs_size = self.g.len();
         let num_elems = n.div_ceil(srs_size);
         let mut chunks = Vec::with_capacity(num_elems);
 
-        // For each chunk
         for i in 0..num_elems {
-            // Initialize the vector with zero curve points
             let mut lg: Vec<<G as AffineRepr>::Group> = vec![<G as AffineRepr>::Group::zero(); n];
-            // Overwrite the terms corresponding to that chunk with the SRS
-            // curve points
             let start_offset = i * srs_size;
             let num_terms = min((i + 1) * srs_size, n) - start_offset;
             for j in 0..num_terms {
                 lg[start_offset + j] = self.g[j].into_group()
             }
-            // Apply the IFFT
             domain.ifft_in_place(&mut lg);
-            // Append the 'partial Langrange polynomials' to the vector of elems
-            // chunks
             chunks.push(<G as AffineRepr>::Group::normalize_batch(lg.as_mut_slice()));
         }
 
@@ -1050,7 +1004,7 @@ impl<G: CommitmentCurve> SRS<G> {
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 #[serde(bound = "G: ark_serialize::CanonicalDeserialize + ark_serialize::CanonicalSerialize")]
 pub struct OpeningProof<G: AffineRepr, const FULL_ROUNDS: usize> {
-    /// Vector of rounds of L & R commitments
+    /// Vector of rounds of L & R commitments.
     #[serde_as(as = "Vec<(o1_utils::serialization::SerdeAs, o1_utils::serialization::SerdeAs)>")]
     pub lr: Vec<(G, G)>,
     #[serde_as(as = "o1_utils::serialization::SerdeAs")]
@@ -1059,7 +1013,7 @@ pub struct OpeningProof<G: AffineRepr, const FULL_ROUNDS: usize> {
     pub z1: G::ScalarField,
     #[serde_as(as = "o1_utils::serialization::SerdeAs")]
     pub z2: G::ScalarField,
-    /// A final folded commitment base
+    /// A final folded commitment base.
     #[serde_as(as = "o1_utils::serialization::SerdeAs")]
     pub sg: G,
 }
@@ -1112,7 +1066,7 @@ pub struct Challenges<F> {
 }
 
 impl<G: AffineRepr, const FULL_ROUNDS: usize> OpeningProof<G, FULL_ROUNDS> {
-    /// Computes a log-sized vector of scalar challenges for
+    /// Compute a log-sized vector of scalar challenges for
     /// recombining elements inside the IPA.
     pub fn prechallenges<EFqSponge: FqSponge<G::BaseField, G, G::ScalarField, FULL_ROUNDS>>(
         &self,
@@ -1129,8 +1083,8 @@ impl<G: AffineRepr, const FULL_ROUNDS: usize> OpeningProof<G, FULL_ROUNDS> {
             .collect()
     }
 
-    /// Same as `prechallenges`, but maps scalar challenges using the provided
-    /// endomorphism, and computes their inverses.
+    /// Same as `prechallenges`, but map scalar challenges using the provided
+    /// endomorphism and compute their inverses.
     pub fn challenges<EFqSponge: FqSponge<G::BaseField, G, G::ScalarField, FULL_ROUNDS>>(
         &self,
         endo_r: &G::ScalarField,
@@ -1165,7 +1119,7 @@ pub mod caml {
 
     #[derive(ocaml::IntoValue, ocaml::FromValue, ocaml_gen::Struct)]
     pub struct CamlOpeningProof<G, F> {
-        /// vector of rounds of L & R commitments
+        /// Vector of rounds of L & R commitments.
         pub lr: Vec<(G, G)>,
         pub delta: G,
         pub z1: F,
