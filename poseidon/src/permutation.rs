@@ -12,27 +12,22 @@ use crate::{
 };
 use ark_ff::Field;
 
-#[cfg(all(feature = "debug-log", not(target_os = "zkvm")))]
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const MDS_WIDTH: usize = 3;
 
-#[cfg(all(feature = "debug-log", not(target_os = "zkvm")))]
 static POSEIDON_PERMUTATION_COUNT: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(all(feature = "debug-log", not(target_os = "zkvm")))]
 #[inline(always)]
 pub fn reset_poseidon_permutation_count() {
     POSEIDON_PERMUTATION_COUNT.store(0, Ordering::Relaxed);
 }
 
-#[cfg(all(feature = "debug-log", not(target_os = "zkvm")))]
 #[inline(always)]
 pub fn poseidon_permutation_count() -> u64 {
     POSEIDON_PERMUTATION_COUNT.load(Ordering::Relaxed)
 }
 
-#[cfg(all(feature = "debug-log", not(target_os = "zkvm")))]
 #[inline(always)]
 pub fn log_poseidon_permutation_count(label: &str) {
     std::println!(
@@ -42,7 +37,6 @@ pub fn log_poseidon_permutation_count(label: &str) {
     );
 }
 
-#[cfg(all(feature = "debug-log", not(target_os = "zkvm")))]
 #[inline(always)]
 fn bump_poseidon_permutation_count() {
     POSEIDON_PERMUTATION_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -156,7 +150,7 @@ pub fn poseidon_block_cipher<F: Field, SC: SpongeConstants, const FULL_ROUNDS: u
     params: &ArithmeticSpongeParams<F, FULL_ROUNDS>,
     state: &mut [F],
 ) {
-    #[cfg(all(feature = "debug-log", not(target_os = "zkvm")))]
+    #[cfg(all(feature = "debug-log"))]
     bump_poseidon_permutation_count();
 
     if SC::PERM_HALF_ROUNDS_FULL == 0 {
