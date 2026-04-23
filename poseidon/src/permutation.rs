@@ -3,9 +3,6 @@
 
 extern crate alloc;
 
-#[cfg(all(feature = "debug-log", not(target_os = "zkvm")))]
-extern crate std;
-
 use crate::{
     constants::SpongeConstants,
     poseidon::{sbox, ArithmeticSpongeParams},
@@ -15,32 +12,6 @@ use ark_ff::Field;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const MDS_WIDTH: usize = 3;
-
-static POSEIDON_PERMUTATION_COUNT: AtomicU64 = AtomicU64::new(0);
-
-#[inline(always)]
-pub fn reset_poseidon_permutation_count() {
-    POSEIDON_PERMUTATION_COUNT.store(0, Ordering::Relaxed);
-}
-
-#[inline(always)]
-pub fn poseidon_permutation_count() -> u64 {
-    POSEIDON_PERMUTATION_COUNT.load(Ordering::Relaxed)
-}
-
-#[inline(always)]
-pub fn log_poseidon_permutation_count(label: &str) {
-    std::println!(
-        "[poseidon-permutations:{}] count={}",
-        label,
-        POSEIDON_PERMUTATION_COUNT.load(Ordering::Relaxed)
-    );
-}
-
-#[inline(always)]
-fn bump_poseidon_permutation_count() {
-    POSEIDON_PERMUTATION_COUNT.fetch_add(1, Ordering::Relaxed);
-}
 
 fn apply_mds_matrix<F: Field, SC: SpongeConstants>(
     mds: [[F; MDS_WIDTH]; MDS_WIDTH],
@@ -149,10 +120,7 @@ pub fn half_rounds<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize>(
 pub fn poseidon_block_cipher<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize>(
     params: &ArithmeticSpongeParams<F, FULL_ROUNDS>,
     state: &mut [F],
-) {
-    #[cfg(all(feature = "debug-log"))]
-    bump_poseidon_permutation_count();
-
+) { 
     if SC::PERM_HALF_ROUNDS_FULL == 0 {
         if SC::PERM_INITIAL_ARK {
             // Keep the previous invariant.
