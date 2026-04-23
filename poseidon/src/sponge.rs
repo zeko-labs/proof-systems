@@ -8,38 +8,50 @@ use alloc::{vec, vec::Vec};
 use ark_ec::models::short_weierstrass::{Affine, SWCurveConfig};
 use ark_ff::{BigInteger, Field, One, PrimeField, Zero};
 
+#[cfg(target_os = "zkvm")]
+#[inline(always)]
+fn cycle_tracker_start_if_needed(in_flight: &mut bool) {
+    if !*in_flight {
+        println!("cycle-tracker-start: poseidon_hash");
+        *in_flight = true;
+    }
+}
+
+#[cfg(target_os = "zkvm")]
+#[inline(always)]
+fn cycle_tracker_end_if_needed(in_flight: &mut bool) {
+    if *in_flight {
+        println!("cycle-tracker-end: poseidon_hash");
+        *in_flight = false;
+    }
+}
+
 /// Abstracts a sponge operating on a base field `Fq` of the curve
-/// `G`. The parameter `Fr` is modelling the scalar field of the
-/// curve.
+/// `G`. The parameter `Fr` models the scalar field of the curve.
 pub trait FqSponge<Fq: Field, G, Fr, const FULL_ROUNDS: usize> {
     /// Creates a new sponge.
     fn new(p: &'static ArithmeticSpongeParams<Fq, FULL_ROUNDS>) -> Self;
 
-    /// Absorbs a base field element. This operation is the most
-    /// straightforward and calls the underlying sponge directly.
+    /// Absorbs base field elements.
     fn absorb_fq(&mut self, x: &[Fq]);
 
-    /// Absorbs a base field point, that is a pair of `Fq` elements.
-    /// In the case of the point to infinity, the values `(0, 0)` are absorbed.
+    /// Absorbs curve points.
+    /// The point at infinity is encoded as `(0, 0)`.
     fn absorb_g(&mut self, g: &[G]);
 
-    /// Absorbs an element of the scalar field `Fr` --- it is done
-    /// by converting the element to the base field first.
+    /// Absorbs scalar field elements by converting them to the base field first.
     fn absorb_fr(&mut self, x: &[Fr]);
 
-    /// Squeeze out a base field challenge. This operation is the most
-    /// direct and calls the underlying sponge.
+    /// Squeezes a base field challenge.
     fn challenge_fq(&mut self) -> Fq;
 
-    /// Squeeze out a challenge in the scalar field. Implemented by
-    /// squeezing out base points and then converting them to a scalar
-    /// field element using binary representation.
+    /// Squeezes a scalar field challenge.
     fn challenge(&mut self) -> Fr;
 
-    /// Returns a base field digest by squeezing the underlying sponge directly.
+    /// Returns a base field digest.
     fn digest_fq(self) -> Fq;
 
-    /// Returns a scalar field digest using the binary representation technique.
+    /// Returns a scalar field digest.
     fn digest(self) -> Fr;
 }
 
@@ -47,14 +59,12 @@ pub const CHALLENGE_LENGTH_IN_LIMBS: usize = 2;
 
 const HIGH_ENTROPY_LIMBS: usize = 2;
 
-// TODO: move to a different file / module
-/// A challenge which is used as a scalar on a group element in the verifier
+/// A challenge used as a scalar on a group element in the verifier.
 #[derive(Clone, Debug)]
 pub struct ScalarChallenge<F>(pub F);
 
 pub fn endo_coefficient<F: PrimeField>() -> F {
     let p_minus_1_over_3 = (F::zero() - F::one()) / F::from(3u64);
-
     F::GENERATOR.pow(p_minus_1_over_3.into_bigint().as_ref())
 }
 
@@ -102,11 +112,15 @@ impl<F: PrimeField> ScalarChallenge<F> {
 pub struct DefaultFqSponge<P: SWCurveConfig, SC: SpongeConstants, const FULL_ROUNDS: usize> {
     pub sponge: ArithmeticSponge<P::BaseField, SC, FULL_ROUNDS>,
     pub last_squeezed: Vec<u64>,
+    #[cfg(target_os = "zkvm")]
+    pub cycle_tracker_in_flight: bool,
 }
 
 pub struct DefaultFrSponge<Fr: Field, SC: SpongeConstants, const FULL_ROUNDS: usize> {
     pub sponge: ArithmeticSponge<Fr, SC, FULL_ROUNDS>,
     pub last_squeezed: Vec<u64>,
+    #[cfg(target_os = "zkvm")]
+    pub cycle_tracker_in_flight: bool,
 }
 
 impl<const FULL_ROUNDS: usize, Fr> From<&'static ArithmeticSpongeParams<Fr, FULL_ROUNDS>>
@@ -118,6 +132,8 @@ where
         DefaultFrSponge {
             sponge: ArithmeticSponge::new(p),
             last_squeezed: vec![],
+            #[cfg(target_os = "zkvm")]
+            cycle_tracker_in_flight: false,
         }
     }
 }
@@ -142,6 +158,10 @@ impl<Fr: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
             Fr::from(pack::<Fr::BigInt>(limbs))
         } else {
             let x = self.sponge.squeeze().into_bigint();
+
+            #[cfg(target_os = "zkvm")]
+            cycle_tracker_end_if_needed(&mut self.cycle_tracker_in_flight);
+
             self.last_squeezed
                 .extend(&x.as_ref()[0..HIGH_ENTROPY_LIMBS]);
             self.squeeze(num_limbs)
@@ -163,6 +183,10 @@ where
             limbs.to_vec()
         } else {
             let x = self.sponge.squeeze().into_bigint();
+
+            #[cfg(target_os = "zkvm")]
+            cycle_tracker_end_if_needed(&mut self.cycle_tracker_in_flight);
+
             self.last_squeezed
                 .extend(&x.as_ref()[0..HIGH_ENTROPY_LIMBS]);
             self.squeeze_limbs(num_limbs)
@@ -171,7 +195,12 @@ where
 
     pub fn squeeze_field(&mut self) -> P::BaseField {
         self.last_squeezed = vec![];
-        self.sponge.squeeze()
+        let out = self.sponge.squeeze();
+
+        #[cfg(target_os = "zkvm")]
+        cycle_tracker_end_if_needed(&mut self.cycle_tracker_in_flight);
+
+        out
     }
 
     pub fn squeeze(&mut self, num_limbs: usize) -> P::ScalarField {
@@ -192,14 +221,19 @@ where
         DefaultFqSponge {
             sponge,
             last_squeezed: vec![],
+            #[cfg(target_os = "zkvm")]
+            cycle_tracker_in_flight: false,
         }
     }
 
     fn absorb_g(&mut self, g: &[Affine<P>]) {
+        #[cfg(target_os = "zkvm")]
+        cycle_tracker_start_if_needed(&mut self.cycle_tracker_in_flight);
+
         self.last_squeezed = vec![];
         for g in g.iter() {
             if g.infinity {
-                // absorb a fake point (0, 0)
+                // Absorb a fake point (0, 0).
                 let zero = P::BaseField::zero();
                 self.sponge.absorb(&[zero]);
                 self.sponge.absorb(&[zero]);
@@ -211,20 +245,25 @@ where
     }
 
     fn absorb_fq(&mut self, x: &[P::BaseField]) {
+        #[cfg(target_os = "zkvm")]
+        cycle_tracker_start_if_needed(&mut self.cycle_tracker_in_flight);
+
         self.last_squeezed = vec![];
 
         for fe in x {
-            self.sponge.absorb(&[*fe])
+            self.sponge.absorb(&[*fe]);
         }
     }
 
     fn absorb_fr(&mut self, x: &[P::ScalarField]) {
+        #[cfg(target_os = "zkvm")]
+        cycle_tracker_start_if_needed(&mut self.cycle_tracker_in_flight);
+
         self.last_squeezed = vec![];
 
         x.iter().for_each(|x| {
             let bits = x.into_bigint().to_bits_le();
 
-            // absorb
             if <P::ScalarField as PrimeField>::MODULUS
                 < <P::BaseField as PrimeField>::MODULUS.into()
             {
@@ -255,10 +294,9 @@ where
         let x: <P::BaseField as PrimeField>::BigInt = self.squeeze_field().into_bigint();
         // Returns zero for values that are too large.
         // This means that there is a bias for the value zero (in one of the curve).
-        // An attacker could try to target that seed, in order to predict the challenges u and v produced by the Fr-Sponge.
-        // This would allow the attacker to mess with the result of the aggregated evaluation proof.
-        // Previously the attacker's odds were 1/q, now it's (q-p)/q.
-        // Since log2(q-p) ~ 86 and log2(q) ~ 254 the odds of a successful attack are negligible.
+        // An attacker could try to target that seed, in order to predict the challenges
+        // produced by the Fr sponge.
+        // Since log2(q - p) is much smaller than log2(q), the attack remains negligible.
         P::ScalarField::from_bigint(x.into()).unwrap_or_else(P::ScalarField::zero)
     }
 
@@ -290,10 +328,7 @@ pub mod caml {
         string::{String, ToString},
     };
 
-    //
-    // ScalarChallenge<F> <-> CamlScalarChallenge<CamlF>
-    //
-
+    /// ScalarChallenge<F> <-> CamlScalarChallenge<CamlF>
     #[derive(Debug, Clone, ocaml::IntoValue, ocaml::FromValue, ocaml_gen::Struct)]
     pub struct CamlScalarChallenge<CamlF>(pub CamlF);
 
