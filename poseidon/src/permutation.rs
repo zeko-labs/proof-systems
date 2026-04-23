@@ -11,6 +11,18 @@ use ark_ff::Field;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+static POSEIDON_PERMUTATION_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[inline(always)]
+pub fn poseidon_permutation_count() -> u64 {
+    POSEIDON_PERMUTATION_COUNT.load(Ordering::Relaxed)
+}
+
+#[inline(always)]
+fn bump_poseidon_permutation_count() {
+    POSEIDON_PERMUTATION_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
 const MDS_WIDTH: usize = 3;
 
 fn apply_mds_matrix<F: Field, SC: SpongeConstants>(
@@ -120,7 +132,10 @@ pub fn half_rounds<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize>(
 pub fn poseidon_block_cipher<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize>(
     params: &ArithmeticSpongeParams<F, FULL_ROUNDS>,
     state: &mut [F],
-) { 
+) {
+    #[cfg(target_os = "zkvm")]
+    bump_poseidon_permutation_count();
+
     if SC::PERM_HALF_ROUNDS_FULL == 0 {
         if SC::PERM_INITIAL_ARK {
             // Keep the previous invariant.

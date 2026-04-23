@@ -2,6 +2,7 @@ extern crate alloc;
 
 use crate::{
     constants::{PlonkSpongeConstantsKimchi, SpongeConstants},
+    permutation::poseidon_permutation_count,
     poseidon::{ArithmeticSponge, ArithmeticSpongeParams, Sponge},
 };
 use alloc::{vec, vec::Vec};
@@ -10,19 +11,26 @@ use ark_ff::{BigInteger, Field, One, PrimeField, Zero};
 
 #[cfg(target_os = "zkvm")]
 #[inline(always)]
-fn cycle_tracker_start_if_needed(in_flight: &mut bool) {
+fn cycle_tracker_start_if_needed(in_flight: &mut bool, perm_start: &mut u64) {
     if !*in_flight {
-        std::println!("cycle-tracker-start: poseidon_hash");
+        println!("cycle-tracker-start: poseidon_hash");
+        *perm_start = poseidon_permutation_count();
         *in_flight = true;
     }
 }
 
 #[cfg(target_os = "zkvm")]
 #[inline(always)]
-fn cycle_tracker_end_if_needed(in_flight: &mut bool) {
+fn cycle_tracker_end_if_needed(in_flight: &mut bool, perm_start: &mut u64) {
     if *in_flight {
-        std::println!("cycle-tracker-end: poseidon_hash");
+        let perm_end = poseidon_permutation_count();
+        println!(
+            "poseidon_hash permutations: {}",
+            perm_end.saturating_sub(*perm_start)
+        );
+        println!("cycle-tracker-end: poseidon_hash");
         *in_flight = false;
+        *perm_start = 0;
     }
 }
 
@@ -114,6 +122,8 @@ pub struct DefaultFqSponge<P: SWCurveConfig, SC: SpongeConstants, const FULL_ROU
     pub last_squeezed: Vec<u64>,
     #[cfg(target_os = "zkvm")]
     pub cycle_tracker_in_flight: bool,
+    #[cfg(target_os = "zkvm")]
+    pub permutation_count_at_start: u64,
 }
 
 pub struct DefaultFrSponge<Fr: Field, SC: SpongeConstants, const FULL_ROUNDS: usize> {
@@ -121,6 +131,8 @@ pub struct DefaultFrSponge<Fr: Field, SC: SpongeConstants, const FULL_ROUNDS: us
     pub last_squeezed: Vec<u64>,
     #[cfg(target_os = "zkvm")]
     pub cycle_tracker_in_flight: bool,
+    #[cfg(target_os = "zkvm")]
+    pub permutation_count_at_start: u64,
 }
 
 impl<const FULL_ROUNDS: usize, Fr> From<&'static ArithmeticSpongeParams<Fr, FULL_ROUNDS>>
