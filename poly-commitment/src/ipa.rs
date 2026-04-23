@@ -60,19 +60,6 @@ where
 }
 
 #[inline(always)]
-fn choose_fixed_msm_window(num_bases: usize) -> usize {
-    match num_bases {
-        0..=32 => 4,
-        33..=128 => 6,
-        129..=512 => 8,
-        513..=2048 => 10,
-        2049..=8192 => 12,
-        8193..=32768 => 13,
-        _ => 14,
-    }
-}
-
-#[inline(always)]
 fn scalar_num_bits<F: PrimeField>() -> usize {
     F::MODULUS_BIT_SIZE as usize
 }
@@ -258,14 +245,14 @@ impl<G: CommitmentCurve> SRS<G> {
 
         #[cfg(target_os = "zkvm")]
         println!(
-            "ipa_verify_setup: batch={} srs_g_len={} padded_length={} max_rounds={} fixed_points={} fixed_scalars={}",
-            batch.len(),
-            self.g.len(),
-            padded_length,
-            max_rounds,
-            fixed_points.len(),
-            fixed_scalars.len(),
-        );
+        "ipa_verify_setup: batch={} srs_g_len={} padded_length={} max_rounds={} fixed_points={} fixed_scalars={}",
+        batch.len(),
+        self.g.len(),
+        padded_length,
+        max_rounds,
+        fixed_points.len(),
+        fixed_scalars.len(),
+    );
 
         println!("cycle-tracker-start: ipa_build_vectors");
 
@@ -389,11 +376,11 @@ impl<G: CommitmentCurve> SRS<G> {
 
             #[cfg(target_os = "zkvm")]
             println!(
-                "ipa_batch_item_after_combine_commitments: dynamic_points={} dynamic_scalars={} evals={}",
-                dynamic_points.len(),
-                dynamic_scalars.len(),
-                evaluations.len(),
-            );
+            "ipa_batch_item_after_combine_commitments: dynamic_points={} dynamic_scalars={} evals={}",
+            dynamic_points.len(),
+            dynamic_scalars.len(),
+            evaluations.len(),
+        );
 
             dynamic_scalars.push(rand_base_i_c_i * *combined_inner_product);
             dynamic_points.push(u_base);
@@ -402,12 +389,12 @@ impl<G: CommitmentCurve> SRS<G> {
 
             #[cfg(target_os = "zkvm")]
             println!(
-                "ipa_batch_item_contrib: added_dynamic_points={} added_dynamic_scalars={} final_dynamic_points={} final_dynamic_scalars={}",
-                dynamic_points.len() - dynamic_points_before,
-                dynamic_scalars.len() - dynamic_scalars_before,
-                dynamic_points.len(),
-                dynamic_scalars.len(),
-            );
+            "ipa_batch_item_contrib: added_dynamic_points={} added_dynamic_scalars={} final_dynamic_points={} final_dynamic_scalars={}",
+            dynamic_points.len() - dynamic_points_before,
+            dynamic_scalars.len() - dynamic_scalars_before,
+            dynamic_points.len(),
+            dynamic_scalars.len(),
+        );
 
             rand_base_i *= &rand_base;
             sg_rand_base_i *= &sg_rand_base;
@@ -470,15 +457,18 @@ impl<G: CommitmentCurve> SRS<G> {
             }
             #[cfg(target_os = "zkvm")]
             {
-                let window_bits = choose_fixed_msm_window(fixed_points.len());
-
                 println!(
-                    "ipa_fixed_msm config: points={} window_bits={}",
+                    "ipa_fixed_msm config: points={} mode=msm_bigint_baseline",
                     fixed_points.len(),
-                    window_bits,
                 );
 
-                self.fixed_base_msm(&fixed_points, &fixed_scalars, window_bits)
+                if fixed_points.is_empty() {
+                    G::Group::zero()
+                } else {
+                    let fixed_scalars_bigint: Vec<_> =
+                        fixed_scalars.iter().map(|x| x.into_bigint()).collect();
+                    G::Group::msm_bigint(&fixed_points, &fixed_scalars_bigint)
+                }
             }
         };
         println!("cycle-tracker-end: ipa_fixed_msm");

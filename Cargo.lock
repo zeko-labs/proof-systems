@@ -219,7 +219,7 @@ dependencies = [
 [[package]]
 name = "ark-ec"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#ee13f64781ffaac0c858b168dd42049396a30ca5"
 dependencies = [
  "ahash",
  "ark-ff 0.5.0",
@@ -261,7 +261,7 @@ dependencies = [
 [[package]]
 name = "ark-ff"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#ee13f64781ffaac0c858b168dd42049396a30ca5"
 dependencies = [
  "ark-ff-asm 0.5.0",
  "ark-ff-macros 0.5.0",
@@ -292,7 +292,7 @@ dependencies = [
 [[package]]
 name = "ark-ff-asm"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#ee13f64781ffaac0c858b168dd42049396a30ca5"
 dependencies = [
  "quote",
  "syn 2.0.117",
@@ -314,7 +314,7 @@ dependencies = [
 [[package]]
 name = "ark-ff-macros"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#ee13f64781ffaac0c858b168dd42049396a30ca5"
 dependencies = [
  "num-bigint 0.4.6",
  "num-traits",
@@ -326,7 +326,7 @@ dependencies = [
 [[package]]
 name = "ark-poly"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#ee13f64781ffaac0c858b168dd42049396a30ca5"
 dependencies = [
  "ahash",
  "ark-ff 0.5.0",
@@ -352,7 +352,7 @@ dependencies = [
 [[package]]
 name = "ark-serialize"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#ee13f64781ffaac0c858b168dd42049396a30ca5"
 dependencies = [
  "ark-serialize-derive",
  "ark-std 0.5.0",
@@ -365,7 +365,7 @@ dependencies = [
 [[package]]
 name = "ark-serialize-derive"
 version = "0.5.0"
-source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#48d0be434ed8effc8e9f1cb9cfd946c8cbc9376d"
+source = "git+https://github.com/zeko-labs/algebra?branch=sp1-msm#ee13f64781ffaac0c858b168dd42049396a30ca5"
 dependencies = [
  "proc-macro2",
  "quote",
