@@ -141,9 +141,11 @@ impl<G: CommitmentCurve> SRS<G> {
         let padded_length = 1 << max_rounds;
         let (_, endo_r) = endos::<G>();
         let padding = padded_length - nonzero_length;
+
         let mut points = vec![self.h];
         points.extend(self.g.clone());
         points.extend(vec![G::zero(); padding]);
+
         let mut scalars = vec![G::ScalarField::zero(); padded_length + 1];
         assert_eq!(scalars.len(), points.len());
 
@@ -152,10 +154,20 @@ impl<G: CommitmentCurve> SRS<G> {
         let mut rand_base_i = G::ScalarField::one();
         let mut sg_rand_base_i = G::ScalarField::one();
 
-        // ------------------------------------------------------------------
-        // Stage 1 — Build scalars/points vectors (sponge + field arithmetic)
-        // ------------------------------------------------------------------
+        #[cfg(target_os = "zkvm")]
+        println!(
+        "ipa_verify_setup: batch={} srs_g_len={} padded_length={} max_rounds={} initial_points={} initial_scalars={}",
+        batch.len(),
+        self.g.len(),
+        padded_length,
+        max_rounds,
+        points.len(),
+        scalars.len(),
+    );
+
+        // Stage 1 — Build scalars/points vectors (sponge + field arithmetic).
         println!("cycle-tracker-start: ipa_build_vectors");
+
         for BatchEvaluationProof {
             sponge,
             evaluation_points,
@@ -166,6 +178,17 @@ impl<G: CommitmentCurve> SRS<G> {
             combined_inner_product,
         } in batch.iter_mut()
         {
+            let points_before = points.len();
+            let scalars_before = scalars.len();
+
+            #[cfg(target_os = "zkvm")]
+            println!(
+                "ipa_batch_item: eval_points={} evals={} lr={}",
+                evaluation_points.len(),
+                evaluations.len(),
+                opening.lr.len(),
+            );
+
             sponge.absorb_fr(&[shift_scalar::<G>(*combined_inner_product)]);
 
             let u_base: G = {
@@ -196,6 +219,13 @@ impl<G: CommitmentCurve> SRS<G> {
             points.push(opening.sg);
             scalars.push(neg_rand_base_i * opening.z1 - sg_rand_base_i);
 
+            #[cfg(target_os = "zkvm")]
+            println!(
+                "ipa_batch_item_after_sg: added_points={} added_scalars={}",
+                points.len() - points_before,
+                scalars.len() - scalars_before,
+            );
+
             {
                 let terms: Vec<_> = s.par_iter().map(|s| sg_rand_base_i * s).collect();
                 for (i, term) in terms.iter().enumerate() {
@@ -203,9 +233,24 @@ impl<G: CommitmentCurve> SRS<G> {
                 }
             }
 
+            #[cfg(target_os = "zkvm")]
+            println!(
+                "ipa_batch_item_after_s_terms: points={} scalars={} s_len={}",
+                points.len(),
+                scalars.len(),
+                s.len(),
+            );
+
             scalars[0] -= &(rand_base_i * opening.z2);
             scalars.push(neg_rand_base_i * (opening.z1 * b0));
             points.push(u_base);
+
+            #[cfg(target_os = "zkvm")]
+            println!(
+                "ipa_batch_item_after_b0_u: points={} scalars={}",
+                points.len(),
+                scalars.len(),
+            );
 
             let rand_base_i_c_i = c * rand_base_i;
             for ((l, r), (u_inv, u)) in opening.lr.iter().zip(chal_inv.iter().zip(chal.iter())) {
@@ -215,6 +260,14 @@ impl<G: CommitmentCurve> SRS<G> {
                 scalars.push(rand_base_i_c_i * u);
             }
 
+            #[cfg(target_os = "zkvm")]
+            println!(
+                "ipa_batch_item_after_lr: points={} scalars={} lr_pairs={}",
+                points.len(),
+                scalars.len(),
+                opening.lr.len(),
+            );
+
             combine_commitments(
                 evaluations,
                 &mut scalars,
@@ -223,24 +276,65 @@ impl<G: CommitmentCurve> SRS<G> {
                 rand_base_i_c_i,
             );
 
+            #[cfg(target_os = "zkvm")]
+            println!(
+                "ipa_batch_item_after_combine_commitments: points={} scalars={} evals={}",
+                points.len(),
+                scalars.len(),
+                evaluations.len(),
+            );
+
             scalars.push(rand_base_i_c_i * *combined_inner_product);
             points.push(u_base);
             scalars.push(rand_base_i);
             points.push(opening.delta);
 
+            #[cfg(target_os = "zkvm")]
+            println!(
+            "ipa_batch_item_contrib: added_points={} added_scalars={} final_points={} final_scalars={}",
+            points.len() - points_before,
+            scalars.len() - scalars_before,
+            points.len(),
+            scalars.len(),
+        );
+
             rand_base_i *= &rand_base;
             sg_rand_base_i *= &sg_rand_base;
         }
+
         println!("cycle-tracker-end: ipa_build_vectors");
+
+        #[cfg(target_os = "zkvm")]
+        {
+            let zero_scalars = scalars.iter().filter(|s| s.is_zero()).count();
+            let zero_points = points.iter().filter(|p| p.is_zero()).count();
+
+            println!(
+                "ipa_final_msm stats: batch={} points={} scalars={} zero_scalars={} zero_points={}",
+                batch.len(),
+                points.len(),
+                scalars.len(),
+                zero_scalars,
+                zero_points,
+            );
+        }
 
         println!("cycle-tracker-start: ipa_final_msm");
 
         // Verify the equation in two chunks, which is optimal for our SRS size.
-        // (see the comment to the `benchmark_msm_parallel_vesta` MSM benchmark)
         let msm_res = {
             #[cfg(not(target_os = "zkvm"))]
             {
                 let chunk_size = points.len() / 2;
+
+                #[cfg(feature = "debug-log")]
+                println!(
+                    "ipa_final_msm native_chunking: total_points={} total_scalars={} chunk_size={}",
+                    points.len(),
+                    scalars.len(),
+                    chunk_size,
+                );
+
                 points
                     .into_par_iter()
                     .chunks(chunk_size)
@@ -257,6 +351,7 @@ impl<G: CommitmentCurve> SRS<G> {
                         l
                     })
             }
+
             #[cfg(target_os = "zkvm")]
             {
                 let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
