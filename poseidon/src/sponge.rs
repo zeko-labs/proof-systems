@@ -10,6 +10,9 @@ use ark_ec::models::short_weierstrass::{Affine, SWCurveConfig};
 use ark_ff::{BigInteger, Field, One, PrimeField, Zero};
 
 #[cfg(target_os = "zkvm")]
+use std::println;
+
+#[cfg(target_os = "zkvm")]
 #[inline(always)]
 fn cycle_tracker_start_if_needed(in_flight: &mut bool, perm_start: &mut u64) {
     if !*in_flight {
@@ -146,6 +149,8 @@ where
             last_squeezed: vec![],
             #[cfg(target_os = "zkvm")]
             cycle_tracker_in_flight: false,
+            #[cfg(target_os = "zkvm")]
+            permutation_count_at_start: 0,
         }
     }
 }
@@ -172,7 +177,10 @@ impl<Fr: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
             let x = self.sponge.squeeze().into_bigint();
 
             #[cfg(target_os = "zkvm")]
-            cycle_tracker_end_if_needed(&mut self.cycle_tracker_in_flight);
+            cycle_tracker_end_if_needed(
+                &mut self.cycle_tracker_in_flight,
+                &mut self.permutation_count_at_start,
+            );
 
             self.last_squeezed
                 .extend(&x.as_ref()[0..HIGH_ENTROPY_LIMBS]);
@@ -197,7 +205,10 @@ where
             let x = self.sponge.squeeze().into_bigint();
 
             #[cfg(target_os = "zkvm")]
-            cycle_tracker_end_if_needed(&mut self.cycle_tracker_in_flight);
+            cycle_tracker_end_if_needed(
+                &mut self.cycle_tracker_in_flight,
+                &mut self.permutation_count_at_start,
+            );
 
             self.last_squeezed
                 .extend(&x.as_ref()[0..HIGH_ENTROPY_LIMBS]);
@@ -210,7 +221,10 @@ where
         let out = self.sponge.squeeze();
 
         #[cfg(target_os = "zkvm")]
-        cycle_tracker_end_if_needed(&mut self.cycle_tracker_in_flight);
+        cycle_tracker_end_if_needed(
+            &mut self.cycle_tracker_in_flight,
+            &mut self.permutation_count_at_start,
+        );
 
         out
     }
@@ -235,12 +249,17 @@ where
             last_squeezed: vec![],
             #[cfg(target_os = "zkvm")]
             cycle_tracker_in_flight: false,
+            #[cfg(target_os = "zkvm")]
+            permutation_count_at_start: 0,
         }
     }
 
     fn absorb_g(&mut self, g: &[Affine<P>]) {
         #[cfg(target_os = "zkvm")]
-        cycle_tracker_start_if_needed(&mut self.cycle_tracker_in_flight);
+        cycle_tracker_start_if_needed(
+            &mut self.cycle_tracker_in_flight,
+            &mut self.permutation_count_at_start,
+        );
 
         self.last_squeezed = vec![];
         for g in g.iter() {
@@ -258,7 +277,10 @@ where
 
     fn absorb_fq(&mut self, x: &[P::BaseField]) {
         #[cfg(target_os = "zkvm")]
-        cycle_tracker_start_if_needed(&mut self.cycle_tracker_in_flight);
+        cycle_tracker_start_if_needed(
+            &mut self.cycle_tracker_in_flight,
+            &mut self.permutation_count_at_start,
+        );
 
         self.last_squeezed = vec![];
 
@@ -269,7 +291,10 @@ where
 
     fn absorb_fr(&mut self, x: &[P::ScalarField]) {
         #[cfg(target_os = "zkvm")]
-        cycle_tracker_start_if_needed(&mut self.cycle_tracker_in_flight);
+        cycle_tracker_start_if_needed(
+            &mut self.cycle_tracker_in_flight,
+            &mut self.permutation_count_at_start,
+        );
 
         self.last_squeezed = vec![];
 

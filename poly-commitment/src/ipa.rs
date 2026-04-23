@@ -233,65 +233,35 @@ impl<G: CommitmentCurve> SRS<G> {
         }
         println!("cycle-tracker-end: ipa_build_vectors");
 
-        // ------------------------------------------------------------------
-        // Stage 2 — Final MSM using SP1-optimized Vesta MSM
-        // ------------------------------------------------------------------
-        // println!("cycle-tracker-start: ipa_pairs");
-
-        // let pairs: Vec<([u8; 32], [u8; 32])> = points
-        //     .iter()
-        //     .map(|p| {
-        //         if p.is_zero() {
-        //             return ([0u8; 32], [0u8; 32]);
-        //         }
-        //         let (x, y) = p.xy().unwrap();
-        //         let x_limbs: [u64; 4] = x.into_bigint().as_ref().try_into().unwrap();
-        //         let y_limbs: [u64; 4] = y.into_bigint().as_ref().try_into().unwrap();
-        //         (bytemuck::cast(x_limbs), bytemuck::cast(y_limbs))
-        //     })
-        //     .collect();
-
-        // let sc_bigints: Vec<[u64; 4]> = scalars
-        //     .iter()
-        //     .map(|s| s.into_bigint().as_ref().try_into().unwrap())
-        //     .collect();
-
-        // println!("cycle-tracker-end: ipa_pairs");
-
-        // println!("cycle-tracker-start: ipa_final_msm");
-        // let result = sp1_msm::sp1_pallas_msm(&pairs, &sc_bigints);
-        // println!("cycle-tracker-end: ipa_final_msm");
-        // return result;
+        println!("cycle-tracker-start: ipa_final_msm");
 
         // Verify the equation in two chunks, which is optimal for our SRS size.
         // (see the comment to the `benchmark_msm_parallel_vesta` MSM benchmark)
         let msm_res = {
-            #[cfg(feature = "parallel")]
-            {
-                println!("parallel msm");
-                let chunk_size = points.len() / 2;
-                points
-                    .into_par_iter()
-                    .chunks(chunk_size)
-                    .zip(scalars.into_par_iter().chunks(chunk_size))
-                    .map(|(bases, coeffs)| {
-                        let coeffs_bigint = coeffs
-                            .into_iter()
-                            .map(ark_ff::PrimeField::into_bigint)
-                            .collect::<Vec<_>>();
-                        G::Group::msm_bigint(&bases, &coeffs_bigint)
-                    })
-                    .reduce(G::Group::zero, |mut l, r| {
-                        l += r;
-                        l
-                    })
-            }
-            #[cfg(not(feature = "parallel"))]
-            {
-                println!("not parallel msm");
-                let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
-                G::Group::msm_bigint(&points, &scalars_bigint)
-            }
+            println!("parallel msm");
+            let chunk_size = points.len() / 2;
+            points
+                .into_par_iter()
+                .chunks(chunk_size)
+                .zip(scalars.into_par_iter().chunks(chunk_size))
+                .map(|(bases, coeffs)| {
+                    let coeffs_bigint = coeffs
+                        .into_iter()
+                        .map(ark_ff::PrimeField::into_bigint)
+                        .collect::<Vec<_>>();
+                    G::Group::msm_bigint(&bases, &coeffs_bigint)
+                })
+                .reduce(G::Group::zero, |mut l, r| {
+                    l += r;
+                    l
+                })
+
+            // #[cfg(not(feature = "parallel"))]
+            // {
+            //     println!("not parallel msm");
+            //     let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
+            //     G::Group::msm_bigint(&points, &scalars_bigint)
+            // }
         };
 
         println!("cycle-tracker-end: ipa_final_msm");
