@@ -161,7 +161,7 @@ pub fn poseidon_block_cipher<F: Field, SC: SpongeConstants, const FULL_ROUNDS: u
     }
 }
 
-//#[cfg(target_os = "zkvm")]
+#[cfg(target_os = "zkvm")]
 mod sp1 {
     use crate::constants::SpongeConstants;
     use crate::poseidon::ArithmeticSpongeParams;
