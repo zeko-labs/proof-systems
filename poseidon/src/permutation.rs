@@ -125,11 +125,12 @@ pub fn poseidon_block_cipher<F: Field, SC: SpongeConstants, const FULL_ROUNDS: u
     {
         // Pallas Fp modulus — works for both Pallas and Vesta
         // detected at runtime via field size if needed
-        let modulus = [
-            0x992d30ed00000001u64,
-            0x224698fc094cf91b,
-            0x0000000000000000,
-            0x4000000000000000,
+        let char = F::characteristic();
+        let modulus: [u64; 4] = [
+            char.get(0).copied().unwrap_or(0),
+            char.get(1).copied().unwrap_or(0),
+            char.get(2).copied().unwrap_or(0),
+            char.get(3).copied().unwrap_or(0),
         ];
         sp1::permute_sp1::<F, SC, FULL_ROUNDS>(params, state, modulus);
         return;
