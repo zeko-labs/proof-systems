@@ -203,18 +203,6 @@ where
     }
 }
 
-fn small_msm<G>(bases: &[G], scalars: &[<G::ScalarField as PrimeField>::BigInt]) -> G::Group
-where
-    G: AffineRepr,
-    G::ScalarField: PrimeField,
-{
-    let mut acc = G::Group::zero();
-    for (p, s) in bases.iter().zip(scalars.iter()) {
-        acc += p.mul_bigint(*s);
-    }
-    acc
-}
-
 /// Additional methods for the SRS structure.
 impl<G: CommitmentCurve> SRS<G> {
     /// Verify a batch of polynomial commitment opening proofs.
@@ -290,14 +278,9 @@ impl<G: CommitmentCurve> SRS<G> {
 
             let neg_rand_base_i = -rand_base_i;
 
-            // opening.sg — correctness check term
+            // opening.sg contributions merged
             dynamic_points.push(opening.sg);
-            dynamic_scalars.push(neg_rand_base_i * opening.z1 - sg_rand_base_i);
-
-            // <s, G> == opening.sg so we replace the 32768-point fixed MSM
-            // with a single scalar multiplication: sg_rand_base_i * opening.sg
-            dynamic_points.push(opening.sg);
-            dynamic_scalars.push(sg_rand_base_i);
+            dynamic_scalars.push(neg_rand_base_i * opening.z1);
 
             // H (fixed base — single scalar accumulation)
             h_scalar -= rand_base_i * opening.z2;
@@ -354,7 +337,7 @@ impl<G: CommitmentCurve> SRS<G> {
             {
                 let scalars_bigint: Vec<_> =
                     dynamic_scalars.iter().map(|x| x.into_bigint()).collect();
-                small_msm(&dynamic_points, &scalars_bigint)
+                G::Group::msm_bigint(&dynamic_points, &scalars_bigint)
             }
             #[cfg(feature = "parallel")]
             {
