@@ -161,59 +161,43 @@ pub fn poseidon_block_cipher<F: Field, SC: SpongeConstants, const FULL_ROUNDS: u
     }
 }
 
-//#[cfg(target_os = "zkvm")]
+#[cfg(target_os = "zkvm")]
 mod sp1 {
     use super::*;
     use crate::constants::SpongeConstants;
+    use crate::pasta::fp_sp1::{MDS as SP1_MDS, ROUND_CONSTANTS as SP1_RC};
     use crate::poseidon::ArithmeticSpongeParams;
     use ark_ff::Field;
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
     use core::array;
-    use crate::pasta::fp_sp1::{MDS as SP1_MDS, ROUND_CONSTANTS as SP1_RC};
 
     const ZERO_LIMBS: [u64; 4] = [0u64; 4];
 
     #[derive(Clone, Copy)]
-    struct Fp {
-        limbs: [u64; 4],
-        modulus: [u64; 4],
-    }
+    #[repr(transparent)]
+    struct Sp1Fp([u64; 4]);
 
     #[inline(always)]
-    fn from_ark<F: CanonicalSerialize>(x: F, modulus: [u64; 4]) -> Fp {
+    fn from_ark<F: CanonicalSerialize>(x: F) -> Sp1Fp {
         let mut buf = [0u8; 32];
         x.serialize_uncompressed(&mut buf[..]).unwrap();
         let limbs: [u64; 4] = bytemuck::cast(buf);
-        Fp { limbs, modulus }
+        Sp1Fp(limbs)
     }
 
     #[inline(always)]
-    fn to_ark<F: CanonicalDeserialize>(fp: Fp) -> F {
-        let buf: [u8; 32] = bytemuck::cast(fp.limbs);
+    fn to_ark<F: CanonicalDeserialize>(fp: Sp1Fp) -> F {
+        let buf: [u8; 32] = bytemuck::cast(fp.0);
         F::deserialize_uncompressed(&buf[..]).unwrap()
     }
 
     #[inline(always)]
-    fn mul(a: Fp, b: Fp) -> Fp {
-        let mut result = [0u64; 4];
-        #[allow(unsafe_code)]
-        unsafe {
-            sp1_lib::sys_bigint(&mut result, 0, &a.limbs, &b.limbs, &a.modulus);
-        }
-        Fp {
-            limbs: result,
-            modulus: a.modulus,
-        }
-    }
-
-    #[inline(always)]
-    fn add(a: Fp, b: Fp) -> Fp {
+    fn add(a: Sp1Fp, b: Sp1Fp, modulus: [u64; 4]) -> Sp1Fp {
         let mut carry = 0u64;
         let mut result = [0u64; 4];
-        let m = &a.modulus;
 
         for i in 0..4 {
-            let (s1, c1) = a.limbs[i].overflowing_add(b.limbs[i]);
+            let (s1, c1) = a.0[i].overflowing_add(b.0[i]);
             let (s2, c2) = s1.overflowing_add(carry);
             result[i] = s2;
             carry = (c1 as u64) + (c2 as u64);
@@ -226,10 +210,10 @@ mod sp1 {
                 if !eq {
                     break;
                 }
-                if result[i] > m[i] {
+                if result[i] > modulus[i] {
                     ge = true;
                     eq = false;
-                } else if result[i] < m[i] {
+                } else if result[i] < modulus[i] {
                     eq = false;
                 }
             }
@@ -239,55 +223,59 @@ mod sp1 {
         if need_reduce {
             let mut borrow = 0u64;
             for i in 0..4 {
-                let (d1, b1) = result[i].overflowing_sub(m[i]);
+                let (d1, b1) = result[i].overflowing_sub(modulus[i]);
                 let (d2, b2) = d1.overflowing_sub(borrow);
                 result[i] = d2;
                 borrow = (b1 as u64) + (b2 as u64);
             }
         }
 
-        Fp {
-            limbs: result,
-            modulus: a.modulus,
+        Sp1Fp(result)
+    }
+
+    #[inline(always)]
+    fn mul(a: Sp1Fp, b: Sp1Fp, modulus: [u64; 4]) -> Sp1Fp {
+        let mut result = [0u64; 4];
+        #[allow(unsafe_code)]
+        unsafe {
+            sp1_lib::sys_bigint(&mut result, 0, &a.0, &b.0, &modulus);
         }
+        Sp1Fp(result)
     }
 
     #[inline(always)]
-    fn pow7(x: Fp) -> Fp {
-        let x2 = mul(x, x);
-        let x4 = mul(x2, x2);
-        let x6 = mul(x4, x2);
-        mul(x6, x)
+    fn pow7(x: Sp1Fp, modulus: [u64; 4]) -> Sp1Fp {
+        let x2 = mul(x, x, modulus);
+        let x4 = mul(x2, x2, modulus);
+        let x6 = mul(x4, x2, modulus);
+        mul(x6, x, modulus)
     }
 
     #[inline(always)]
-    fn full_round_sp1<F: CanonicalSerialize + Clone>(
-        state: &mut [Fp; 3],
-        mds: &[[Fp; 3]; 3],
-        rc: &[F; 3],
+    fn full_round_sp1(
+        state: &mut [Sp1Fp; 3],
+        mds: &[[[u64; 4]; 3]; 3],
+        rc: &[[u64; 4]; 3],
         modulus: [u64; 4],
     ) {
-        // S-box x^7
+        // Apply the x^7 S-box to each element.
         for i in 0..3 {
-            state[i] = pow7(state[i]);
+            state[i] = pow7(state[i], modulus);
         }
 
-        // MDS matrix
+        // Apply the MDS matrix.
         let tmp = *state;
         for row in 0..3 {
-            state[row] = (0..3).fold(
-                Fp {
-                    limbs: ZERO_LIMBS,
-                    modulus,
-                },
-                |acc: Fp, col: usize| add(acc, mul(mds[row][col], tmp[col])),
-            );
+            let mut acc = Sp1Fp(ZERO_LIMBS);
+            for col in 0..3 {
+                acc = add(acc, mul(Sp1Fp(mds[row][col]), tmp[col], modulus), modulus);
+            }
+            state[row] = acc;
         }
 
-        // Round constants
+        // Add round constants.
         for i in 0..3 {
-            let rc_fp = from_ark(rc[i].clone(), modulus);
-            state[i] = add(state[i], rc_fp);
+            state[i] = add(state[i], Sp1Fp(rc[i]), modulus);
         }
     }
 
@@ -296,32 +284,30 @@ mod sp1 {
         SC: SpongeConstants,
         const FULL_ROUNDS: usize,
     >(
-        params: &ArithmeticSpongeParams<F, FULL_ROUNDS>,
+        _params: &ArithmeticSpongeParams<F, FULL_ROUNDS>,
         state: &mut [F],
         modulus: [u64; 4],
     ) {
-        // Convert state ark-ff → Fp standard form
-        let mut s: [Fp; 3] = array::from_fn(|i| from_ark(state[i], modulus));
+        // Convert ark field elements into the SP1-friendly representation.
+        let mut s: [Sp1Fp; 3] = array::from_fn(|i| from_ark(state[i]));
 
-        // Pre-convert MDS matrix
-        let mds: [[Fp; 3]; 3] =
-            array::from_fn(|row| array::from_fn(|col| from_ark(params.mds[row][col], modulus)));
+        let mds: [[[u64; 4]; 3]; 3] = SP1_MDS;
+        let rc: [[[u64; 4]; 3]; 55] = SP1_RC;
 
         if SC::PERM_INITIAL_ARK {
             for i in 0..3 {
-                let rc = from_ark(params.round_constants[0][i], modulus);
-                s[i] = add(s[i], rc);
+                s[i] = add(s[i], Sp1Fp(rc[0][i]), modulus);
             }
             for r in 0..SC::PERM_ROUNDS_FULL {
-                full_round_sp1(&mut s, &mds, &params.round_constants[r + 1], modulus);
+                full_round_sp1(&mut s, &mds, &rc[r + 1], modulus);
             }
         } else {
             for r in 0..SC::PERM_ROUNDS_FULL {
-                full_round_sp1(&mut s, &mds, &params.round_constants[r], modulus);
+                full_round_sp1(&mut s, &mds, &rc[r], modulus);
             }
         }
 
-        // Convert back → ark-ff
+        // Convert back into ark field elements.
         for i in 0..3 {
             state[i] = to_ark(s[i]);
         }
