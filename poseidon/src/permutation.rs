@@ -161,13 +161,15 @@ pub fn poseidon_block_cipher<F: Field, SC: SpongeConstants, const FULL_ROUNDS: u
     }
 }
 
-#[cfg(target_os = "zkvm")]
+//#[cfg(target_os = "zkvm")]
 mod sp1 {
+    use super::*;
     use crate::constants::SpongeConstants;
     use crate::poseidon::ArithmeticSpongeParams;
     use ark_ff::Field;
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
     use core::array;
+    use crate::pasta::fp_sp1::{MDS as SP1_MDS, ROUND_CONSTANTS as SP1_RC};
 
     const ZERO_LIMBS: [u64; 4] = [0u64; 4];
 
