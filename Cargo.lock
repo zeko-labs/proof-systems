@@ -2715,6 +2715,7 @@ dependencies = [
  "ark-ff 0.5.0",
  "ark-poly",
  "ark-serialize 0.5.0",
+ "bytemuck",
  "criterion",
  "hex",
  "mina-curves",
@@ -2727,6 +2728,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "sp1-lib",
 ]
 
 [[package]]
