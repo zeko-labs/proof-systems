@@ -243,6 +243,9 @@ impl<G: CommitmentCurve> SRS<G> {
         let mut rand_base_i = G::ScalarField::one();
         let mut sg_rand_base_i = G::ScalarField::one();
 
+        let mut last_opening = G::zero(); // juste pour l'initialiser, la vraie valeur est mise à jour dans la boucle
+        let mut last_sg_rand = G::ScalarField::zero();
+
         #[cfg(target_os = "zkvm")]
         println!(
         "ipa_verify_setup: batch={} srs_g_len={} padded_length={} max_rounds={} fixed_points={} fixed_scalars={}",
@@ -319,10 +322,8 @@ impl<G: CommitmentCurve> SRS<G> {
 
             // s contributes to the fixed SRS basis G_i.
             {
-                let terms: Vec<_> = s.par_iter().map(|s| sg_rand_base_i * s).collect();
-                for (i, term) in terms.iter().enumerate() {
-                    fixed_scalars[i + 1] += term;
-                }
+                dynamic_points.push(opening.sg);
+                dynamic_scalars.push(sg_rand_base_i);
             }
 
             #[cfg(target_os = "zkvm")]
@@ -396,6 +397,10 @@ impl<G: CommitmentCurve> SRS<G> {
             dynamic_scalars.len(),
         );
 
+            last_opening = opening.sg; // sauvegarde pour le check après la boucle
+
+            last_sg_rand = sg_rand_base_i; // avant la mise à jour
+
             rand_base_i *= &rand_base;
             sg_rand_base_i *= &sg_rand_base;
         }
@@ -430,80 +435,57 @@ impl<G: CommitmentCurve> SRS<G> {
             );
         }
 
-        #[cfg(target_os = "zkvm")]
-        {
-            eprintln!(
-                "fixed_scalars non-zero = {}",
-                fixed_scalars.iter().filter(|s| !s.is_zero()).count()
-            );
-            eprintln!(
-                "fixed_scalars[0] (H) = {:?}",
-                fixed_scalars[0].into_bigint().as_ref()[0]
-            );
+        eprintln!(
+            "fixed_scalars non-zero = {}",
+            fixed_scalars.iter().filter(|s| !s.is_zero()).count()
+        );
+        eprintln!(
+            "fixed_scalars[0] (H) = {:?}",
+            fixed_scalars[0].into_bigint().as_ref()[0]
+        );
 
-            // Combien de scalaires G[i] sont non-nuls ?
-            let g_nonzero = fixed_scalars[1..].iter().filter(|s| !s.is_zero()).count();
-            eprintln!(
-                "fixed_scalars G[i] non-zero = {}/{}",
-                g_nonzero,
-                fixed_scalars.len() - 1
-            );
+        // Combien de scalaires G[i] sont non-nuls ?
+        let g_nonzero = fixed_scalars[1..].iter().filter(|s| !s.is_zero()).count();
+        eprintln!(
+            "fixed_scalars G[i] non-zero = {}/{}",
+            g_nonzero,
+            fixed_scalars.len() - 1
+        );
 
-            // Les scalaires G[i] sont-ils tous sg_rand_base_i * s[i] ?
-            // sg_rand_base_i est une constante par batch — tous les G[i] scalaires
-            // partagent le même facteur
-            eprintln!(
-                "sg_rand_base_i = {:?}",
-                sg_rand_base_i.into_bigint().as_ref()
-            );
-            eprintln!("opening.sg.x[..4] = {:?}", {
-                use ark_serialize::CanonicalSerialize;
-                let mut buf = [0u8; 32];
-                // juste pour voir la valeur
-                fixed_points[1].x().serialize_uncompressed(&mut buf[..]).ok();
-                buf[..4].to_vec()
-            });
-        }
+        // Les scalaires G[i] sont-ils tous sg_rand_base_i * s[i] ?
+        // sg_rand_base_i est une constante par batch — tous les G[i] scalaires
+        // partagent le même facteur
+        eprintln!(
+            "sg_rand_base_i = {:?}",
+            sg_rand_base_i.into_bigint().as_ref()
+        );
+        eprintln!("opening.sg.x[..4] = {:?}", {
+            use ark_serialize::CanonicalSerialize;
+            let mut buf = [0u8; 32];
+            // juste pour voir la valeur
+            fixed_points[1]
+                .x()
+                .serialize_uncompressed(&mut buf[..])
+                .ok();
+            buf[..4].to_vec()
+        });
+
+        let s_g_scalars: Vec<_> = fixed_scalars[1..].iter().map(|x| x.into_bigint()).collect();
+        let s_g_result = G::Group::msm_bigint(&fixed_points[1..], &s_g_scalars);
+        let expected = last_opening.into_group() * last_sg_rand;
+
+        eprintln!(
+            "s_g == sg_rand_base_i * opening.sg: {}",
+            s_g_result == expected
+        );
 
         println!("cycle-tracker-start: ipa_fixed_msm");
         let fixed_res = {
-            #[cfg(not(target_os = "zkvm"))]
-            {
-                if fixed_points.is_empty() {
-                    G::Group::zero()
-                } else {
-                    let chunk_size = (fixed_points.len() + 1) / 2;
-                    fixed_points
-                        .into_par_iter()
-                        .chunks(chunk_size)
-                        .zip(fixed_scalars.into_par_iter().chunks(chunk_size))
-                        .map(|(bases, coeffs)| {
-                            let coeffs_bigint = coeffs
-                                .into_iter()
-                                .map(ark_ff::PrimeField::into_bigint)
-                                .collect::<Vec<_>>();
-                            G::Group::msm_bigint(&bases, &coeffs_bigint)
-                        })
-                        .reduce(G::Group::zero, |mut l, r| {
-                            l += r;
-                            l
-                        })
-                }
-            }
-            #[cfg(target_os = "zkvm")]
-            {
-                println!(
-                    "ipa_fixed_msm config: points={} mode=msm_bigint_baseline",
-                    fixed_points.len(),
-                );
-
-                if fixed_points.is_empty() {
-                    G::Group::zero()
-                } else {
-                    let fixed_scalars_bigint: Vec<_> =
-                        fixed_scalars.iter().map(|x| x.into_bigint()).collect();
-                    G::Group::msm_bigint(&fixed_points, &fixed_scalars_bigint)
-                }
+            let h_scalar = fixed_scalars[0];
+            if h_scalar.is_zero() {
+                G::Group::zero()
+            } else {
+                self.h.into_group() * h_scalar
             }
         };
         println!("cycle-tracker-end: ipa_fixed_msm");
