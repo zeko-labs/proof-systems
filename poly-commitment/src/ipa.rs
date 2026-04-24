@@ -203,6 +203,18 @@ where
     }
 }
 
+fn small_msm<G>(bases: &[G], scalars: &[<G::ScalarField as PrimeField>::BigInt]) -> G::Group
+where
+    G: AffineRepr,
+    G::ScalarField: PrimeField,
+{
+    let mut acc = G::Group::zero();
+    for (p, s) in bases.iter().zip(scalars.iter()) {
+        acc += p.mul_bigint(*s);
+    }
+    acc
+}
+
 /// Additional methods for the SRS structure.
 impl<G: CommitmentCurve> SRS<G> {
     /// Verify a batch of polynomial commitment opening proofs.
@@ -342,7 +354,7 @@ impl<G: CommitmentCurve> SRS<G> {
             {
                 let scalars_bigint: Vec<_> =
                     dynamic_scalars.iter().map(|x| x.into_bigint()).collect();
-                G::Group::msm_bigint(&dynamic_points, &scalars_bigint)
+                small_msm(&dynamic_points, &scalars_bigint)
             }
             #[cfg(feature = "parallel")]
             {
