@@ -227,14 +227,11 @@ impl<G: CommitmentCurve> SRS<G> {
         let max_rounds = math::ceil_log2(nonzero_length);
         let padded_length = 1 << max_rounds;
         let (_, endo_r) = endos::<G>();
-        let padding = padded_length - nonzero_length;
 
-        // Fixed-base MSM inputs: H + SRS G vector + padding.
-        let fixed_points = self.fixed_bases_with_h(padding);
-        let mut fixed_scalars = vec![G::ScalarField::zero(); padded_length + 1];
-        assert_eq!(fixed_scalars.len(), fixed_points.len());
+        // H scalar accumulator (fixed base)
+        let mut h_scalar = G::ScalarField::zero();
 
-        // Dynamic MSM inputs: everything that is not part of the static SRS basis.
+        // Dynamic MSM inputs
         let mut dynamic_points = Vec::new();
         let mut dynamic_scalars = Vec::new();
 
@@ -242,20 +239,6 @@ impl<G: CommitmentCurve> SRS<G> {
         let sg_rand_base = G::ScalarField::rand(rng);
         let mut rand_base_i = G::ScalarField::one();
         let mut sg_rand_base_i = G::ScalarField::one();
-
-        let mut last_opening = G::zero(); // juste pour l'initialiser, la vraie valeur est mise à jour dans la boucle
-        let mut last_sg_rand = G::ScalarField::zero();
-
-        #[cfg(target_os = "zkvm")]
-        println!(
-        "ipa_verify_setup: batch={} srs_g_len={} padded_length={} max_rounds={} fixed_points={} fixed_scalars={}",
-        batch.len(),
-        self.g.len(),
-        padded_length,
-        max_rounds,
-        fixed_points.len(),
-        fixed_scalars.len(),
-    );
 
         println!("cycle-tracker-start: ipa_build_vectors");
 
@@ -269,19 +252,6 @@ impl<G: CommitmentCurve> SRS<G> {
             combined_inner_product,
         } in batch.iter_mut()
         {
-            #[cfg(target_os = "zkvm")]
-            let dynamic_points_before = dynamic_points.len();
-            #[cfg(target_os = "zkvm")]
-            let dynamic_scalars_before = dynamic_scalars.len();
-
-            #[cfg(target_os = "zkvm")]
-            println!(
-                "ipa_batch_item: eval_points={} evals={} lr={}",
-                evaluation_points.len(),
-                evaluations.len(),
-                opening.lr.len(),
-            );
-
             sponge.absorb_fr(&[shift_scalar::<G>(*combined_inner_product)]);
 
             let u_base: G = {
@@ -306,51 +276,27 @@ impl<G: CommitmentCurve> SRS<G> {
                 res
             };
 
-            let s = b_poly_coefficients(&chal);
             let neg_rand_base_i = -rand_base_i;
 
-            // opening.sg is dynamic.
+            // opening.sg — correctness check term
             dynamic_points.push(opening.sg);
             dynamic_scalars.push(neg_rand_base_i * opening.z1 - sg_rand_base_i);
 
-            #[cfg(target_os = "zkvm")]
-            println!(
-                "ipa_batch_item_after_sg: added_dynamic_points={} added_dynamic_scalars={}",
-                dynamic_points.len() - dynamic_points_before,
-                dynamic_scalars.len() - dynamic_scalars_before,
-            );
+            // <s, G> == opening.sg so we replace the 32768-point fixed MSM
+            // with a single scalar multiplication: sg_rand_base_i * opening.sg
+            dynamic_points.push(opening.sg);
+            dynamic_scalars.push(sg_rand_base_i);
 
-            // s contributes to the fixed SRS basis G_i.
-            {
-                dynamic_points.push(opening.sg);
-                dynamic_scalars.push(sg_rand_base_i);
-            }
+            // H (fixed base — single scalar accumulation)
+            h_scalar -= rand_base_i * opening.z2;
 
-            #[cfg(target_os = "zkvm")]
-            println!(
-                "ipa_batch_item_after_s_terms: fixed_points={} fixed_scalars={} s_len={}",
-                fixed_points.len(),
-                fixed_scalars.len(),
-                s.len(),
-            );
-
-            // H is fixed.
-            fixed_scalars[0] -= &(rand_base_i * opening.z2);
-
-            // u_base is dynamic.
+            // u_base terms
             dynamic_scalars.push(neg_rand_base_i * (opening.z1 * b0));
             dynamic_points.push(u_base);
 
-            #[cfg(target_os = "zkvm")]
-            println!(
-                "ipa_batch_item_after_b0_u: dynamic_points={} dynamic_scalars={}",
-                dynamic_points.len(),
-                dynamic_scalars.len(),
-            );
-
             let rand_base_i_c_i = c * rand_base_i;
 
-            // L/R commitments are dynamic.
+            // L/R commitments
             for ((l, r), (u_inv, u)) in opening.lr.iter().zip(chal_inv.iter().zip(chal.iter())) {
                 dynamic_points.push(*l);
                 dynamic_scalars.push(rand_base_i_c_i * u_inv);
@@ -358,15 +304,7 @@ impl<G: CommitmentCurve> SRS<G> {
                 dynamic_scalars.push(rand_base_i_c_i * u);
             }
 
-            #[cfg(target_os = "zkvm")]
-            println!(
-                "ipa_batch_item_after_lr: dynamic_points={} dynamic_scalars={} lr_pairs={}",
-                dynamic_points.len(),
-                dynamic_scalars.len(),
-                opening.lr.len(),
-            );
-
-            // Commitment openings are dynamic bases.
+            // Commitment openings
             combine_commitments(
                 evaluations,
                 &mut dynamic_scalars,
@@ -375,31 +313,10 @@ impl<G: CommitmentCurve> SRS<G> {
                 rand_base_i_c_i,
             );
 
-            #[cfg(target_os = "zkvm")]
-            println!(
-            "ipa_batch_item_after_combine_commitments: dynamic_points={} dynamic_scalars={} evals={}",
-            dynamic_points.len(),
-            dynamic_scalars.len(),
-            evaluations.len(),
-        );
-
             dynamic_scalars.push(rand_base_i_c_i * *combined_inner_product);
             dynamic_points.push(u_base);
             dynamic_scalars.push(rand_base_i);
             dynamic_points.push(opening.delta);
-
-            #[cfg(target_os = "zkvm")]
-            println!(
-            "ipa_batch_item_contrib: added_dynamic_points={} added_dynamic_scalars={} final_dynamic_points={} final_dynamic_scalars={}",
-            dynamic_points.len() - dynamic_points_before,
-            dynamic_scalars.len() - dynamic_scalars_before,
-            dynamic_points.len(),
-            dynamic_scalars.len(),
-        );
-
-            last_opening = opening.sg; // sauvegarde pour le check après la boucle
-
-            last_sg_rand = sg_rand_base_i; // avant la mise à jour
 
             rand_base_i *= &rand_base;
             sg_rand_base_i *= &sg_rand_base;
@@ -407,130 +324,50 @@ impl<G: CommitmentCurve> SRS<G> {
 
         println!("cycle-tracker-end: ipa_build_vectors");
 
-        #[cfg(target_os = "zkvm")]
-        {
-            let fixed_zero_scalars = fixed_scalars.iter().filter(|s| s.is_zero()).count();
-            let fixed_zero_points = fixed_points.iter().filter(|p| p.is_zero()).count();
-            let dynamic_zero_scalars = dynamic_scalars.iter().filter(|s| s.is_zero()).count();
-            let dynamic_zero_points = dynamic_points.iter().filter(|p| p.is_zero()).count();
-
-            println!(
-                "ipa_fixed_msm stats: points={} scalars={} zero_scalars={} zero_points={}",
-                fixed_points.len(),
-                fixed_scalars.len(),
-                fixed_zero_scalars,
-                fixed_zero_points,
-            );
-            println!(
-                "ipa_dynamic_msm stats: points={} scalars={} zero_scalars={} zero_points={}",
-                dynamic_points.len(),
-                dynamic_scalars.len(),
-                dynamic_zero_scalars,
-                dynamic_zero_points,
-            );
-            println!(
-                "ipa_total_msm stats: points={} scalars={}",
-                fixed_points.len() + dynamic_points.len(),
-                fixed_scalars.len() + dynamic_scalars.len(),
-            );
-        }
-
-        eprintln!(
-            "fixed_scalars non-zero = {}",
-            fixed_scalars.iter().filter(|s| !s.is_zero()).count()
-        );
-        eprintln!(
-            "fixed_scalars[0] (H) = {:?}",
-            fixed_scalars[0].into_bigint().as_ref()[0]
-        );
-
-        // Combien de scalaires G[i] sont non-nuls ?
-        let g_nonzero = fixed_scalars[1..].iter().filter(|s| !s.is_zero()).count();
-        eprintln!(
-            "fixed_scalars G[i] non-zero = {}/{}",
-            g_nonzero,
-            fixed_scalars.len() - 1
-        );
-
-        // Les scalaires G[i] sont-ils tous sg_rand_base_i * s[i] ?
-        // sg_rand_base_i est une constante par batch — tous les G[i] scalaires
-        // partagent le même facteur
-        eprintln!(
-            "sg_rand_base_i = {:?}",
-            sg_rand_base_i.into_bigint().as_ref()
-        );
-        eprintln!("opening.sg.x[..4] = {:?}", {
-            use ark_serialize::CanonicalSerialize;
-            let mut buf = [0u8; 32];
-            // juste pour voir la valeur
-            fixed_points[1]
-                .x()
-                .serialize_uncompressed(&mut buf[..])
-                .ok();
-            buf[..4].to_vec()
-        });
-
-        let s_g_scalars: Vec<_> = fixed_scalars[1..].iter().map(|x| x.into_bigint()).collect();
-        let s_g_result = G::Group::msm_bigint(&fixed_points[1..], &s_g_scalars);
-        let expected = last_opening.into_group() * last_sg_rand;
-
-        eprintln!(
-            "s_g == sg_rand_base_i * opening.sg: {}",
-            s_g_result == expected
-        );
-
+        // Fixed base: only H remains
         println!("cycle-tracker-start: ipa_fixed_msm");
-        let fixed_res = {
-            let h_scalar = fixed_scalars[0];
-            if h_scalar.is_zero() {
-                G::Group::zero()
-            } else {
-                self.h.into_group() * h_scalar
-            }
+        let fixed_res = if h_scalar.is_zero() {
+            G::Group::zero()
+        } else {
+            self.h.into_group() * h_scalar
         };
         println!("cycle-tracker-end: ipa_fixed_msm");
 
+        // Dynamic MSM
         println!("cycle-tracker-start: ipa_dynamic_msm");
-        let dynamic_res = {
-            #[cfg(not(target_os = "zkvm"))]
+        let dynamic_res = if dynamic_points.is_empty() {
+            G::Group::zero()
+        } else {
+            #[cfg(not(feature = "parallel"))]
             {
-                if dynamic_points.is_empty() {
-                    G::Group::zero()
-                } else {
-                    let chunk_size = (dynamic_points.len() + 1) / 2;
-                    dynamic_points
-                        .into_par_iter()
-                        .chunks(chunk_size)
-                        .zip(dynamic_scalars.into_par_iter().chunks(chunk_size))
-                        .map(|(bases, coeffs)| {
-                            let coeffs_bigint = coeffs
-                                .into_iter()
-                                .map(ark_ff::PrimeField::into_bigint)
-                                .collect::<Vec<_>>();
-                            G::Group::msm_bigint(&bases, &coeffs_bigint)
-                        })
-                        .reduce(G::Group::zero, |mut l, r| {
-                            l += r;
-                            l
-                        })
-                }
+                let scalars_bigint: Vec<_> =
+                    dynamic_scalars.iter().map(|x| x.into_bigint()).collect();
+                G::Group::msm_bigint(&dynamic_points, &scalars_bigint)
             }
-            #[cfg(target_os = "zkvm")]
+            #[cfg(feature = "parallel")]
             {
-                if dynamic_points.is_empty() {
-                    G::Group::zero()
-                } else {
-                    let dynamic_scalars_bigint: Vec<_> =
-                        dynamic_scalars.iter().map(|x| x.into_bigint()).collect();
-                    G::Group::msm_bigint(&dynamic_points, &dynamic_scalars_bigint)
-                }
+                let chunk_size = (dynamic_points.len() + 1) / 2;
+                dynamic_points
+                    .into_par_iter()
+                    .chunks(chunk_size)
+                    .zip(dynamic_scalars.into_par_iter().chunks(chunk_size))
+                    .map(|(bases, coeffs)| {
+                        let coeffs_bigint = coeffs
+                            .into_iter()
+                            .map(ark_ff::PrimeField::into_bigint)
+                            .collect::<Vec<_>>();
+                        G::Group::msm_bigint(&bases, &coeffs_bigint)
+                    })
+                    .reduce(G::Group::zero, |mut l, r| {
+                        l += r;
+                        l
+                    })
             }
         };
         println!("cycle-tracker-end: ipa_dynamic_msm");
 
         let mut msm_res = fixed_res;
         msm_res += dynamic_res;
-
         msm_res == G::Group::zero()
     }
 
