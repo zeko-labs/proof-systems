@@ -430,6 +430,41 @@ impl<G: CommitmentCurve> SRS<G> {
             );
         }
 
+        #[cfg(target_os = "zkvm")]
+        {
+            eprintln!(
+                "fixed_scalars non-zero = {}",
+                fixed_scalars.iter().filter(|s| !s.is_zero()).count()
+            );
+            eprintln!(
+                "fixed_scalars[0] (H) = {:?}",
+                fixed_scalars[0].into_bigint().as_ref()[0]
+            );
+
+            // Combien de scalaires G[i] sont non-nuls ?
+            let g_nonzero = fixed_scalars[1..].iter().filter(|s| !s.is_zero()).count();
+            eprintln!(
+                "fixed_scalars G[i] non-zero = {}/{}",
+                g_nonzero,
+                fixed_scalars.len() - 1
+            );
+
+            // Les scalaires G[i] sont-ils tous sg_rand_base_i * s[i] ?
+            // sg_rand_base_i est une constante par batch — tous les G[i] scalaires
+            // partagent le même facteur
+            eprintln!(
+                "sg_rand_base_i = {:?}",
+                sg_rand_base_i.into_bigint().as_ref()
+            );
+            eprintln!("opening.sg.x[..4] = {:?}", {
+                use ark_serialize::CanonicalSerialize;
+                let mut buf = [0u8; 32];
+                // juste pour voir la valeur
+                fixed_points[1].x.serialize_uncompressed(&mut buf[..]).ok();
+                buf[..4].to_vec()
+            });
+        }
+
         println!("cycle-tracker-start: ipa_fixed_msm");
         let fixed_res = {
             #[cfg(not(target_os = "zkvm"))]
