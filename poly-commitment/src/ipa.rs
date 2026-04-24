@@ -460,7 +460,7 @@ impl<G: CommitmentCurve> SRS<G> {
                 use ark_serialize::CanonicalSerialize;
                 let mut buf = [0u8; 32];
                 // juste pour voir la valeur
-                fixed_points[1].x.serialize_uncompressed(&mut buf[..]).ok();
+                fixed_points[1].x().serialize_uncompressed(&mut buf[..]).ok();
                 buf[..4].to_vec()
             });
         }
