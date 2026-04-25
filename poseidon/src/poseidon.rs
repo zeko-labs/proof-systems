@@ -619,6 +619,59 @@ mod zkvm_fast {
     }
 
     #[inline(always)]
+    fn ge_limbs(a: Sp1Limbs, b: Sp1Limbs) -> bool {
+        for i in (0..4).rev() {
+            if a[i] > b[i] {
+                return true;
+            }
+            if a[i] < b[i] {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    #[inline(always)]
+    fn sub_modulus_once(mut x: Sp1Limbs, modulus: Sp1Limbs) -> Sp1Limbs {
+        let mut borrow = 0u64;
+
+        for i in 0..4 {
+            let (d1, b1) = x[i].overflowing_sub(modulus[i]);
+            let (d2, b2) = d1.overflowing_sub(borrow);
+
+            x[i] = d2;
+            borrow = (b1 as u64) + (b2 as u64);
+        }
+
+        x
+    }
+
+    #[inline(always)]
+    fn add3_reduce(a: Sp1Fp, b: Sp1Fp, c: Sp1Fp, modulus: Sp1Limbs) -> Sp1Fp {
+        let mut out = [0u64; 4];
+        let mut carry = 0u64;
+
+        for i in 0..4 {
+            let sum = a.0[i] as u128 + b.0[i] as u128 + c.0[i] as u128 + carry as u128;
+            out[i] = sum as u64;
+            carry = (sum >> 64) as u64;
+        }
+
+        // For Pasta fields: a,b,c < p, so sum < 3p.
+        // That means at most two subtractions are needed.
+        if carry != 0 || ge_limbs(out, modulus) {
+            out = sub_modulus_once(out, modulus);
+        }
+
+        if ge_limbs(out, modulus) {
+            out = sub_modulus_once(out, modulus);
+        }
+
+        Sp1Fp(out)
+    }
+
+    #[inline(always)]
     fn mul(a: Sp1Fp, b: Sp1Fp, modulus: Sp1Limbs) -> Sp1Fp {
         let mut out = [0u64; 4];
         #[allow(unsafe_code)]
@@ -650,7 +703,6 @@ mod zkvm_fast {
         state: &mut [Sp1Fp; 3],
         modulus: Sp1Limbs,
     ) {
-        #[cfg(target_os = "zkvm")]
         zk_cycle_start!("zkvm_apply_mds");
 
         if !SC::PERM_FULL_MDS {
@@ -662,45 +714,47 @@ mod zkvm_fast {
             state[1] = add(s0, s1, modulus);
             state[2] = add(s1, s2, modulus);
 
-            #[cfg(target_os = "zkvm")]
             zk_cycle_end!("zkvm_apply_mds");
-
             return;
         }
 
-        let tmp = *state;
+        let s0 = state[0];
+        let s1 = state[1];
+        let s2 = state[2];
 
-        state[0] = add(
-            add(
-                mul(Sp1Fp(mds[0][0]), tmp[0], modulus),
-                mul(Sp1Fp(mds[0][1]), tmp[1], modulus),
-                modulus,
-            ),
-            mul(Sp1Fp(mds[0][2]), tmp[2], modulus),
+        let m00 = Sp1Fp(mds[0][0]);
+        let m01 = Sp1Fp(mds[0][1]);
+        let m02 = Sp1Fp(mds[0][2]);
+
+        let m10 = Sp1Fp(mds[1][0]);
+        let m11 = Sp1Fp(mds[1][1]);
+        let m12 = Sp1Fp(mds[1][2]);
+
+        let m20 = Sp1Fp(mds[2][0]);
+        let m21 = Sp1Fp(mds[2][1]);
+        let m22 = Sp1Fp(mds[2][2]);
+
+        state[0] = add3_reduce(
+            mul(m00, s0, modulus),
+            mul(m01, s1, modulus),
+            mul(m02, s2, modulus),
             modulus,
         );
 
-        state[1] = add(
-            add(
-                mul(Sp1Fp(mds[1][0]), tmp[0], modulus),
-                mul(Sp1Fp(mds[1][1]), tmp[1], modulus),
-                modulus,
-            ),
-            mul(Sp1Fp(mds[1][2]), tmp[2], modulus),
+        state[1] = add3_reduce(
+            mul(m10, s0, modulus),
+            mul(m11, s1, modulus),
+            mul(m12, s2, modulus),
             modulus,
         );
 
-        state[2] = add(
-            add(
-                mul(Sp1Fp(mds[2][0]), tmp[0], modulus),
-                mul(Sp1Fp(mds[2][1]), tmp[1], modulus),
-                modulus,
-            ),
-            mul(Sp1Fp(mds[2][2]), tmp[2], modulus),
+        state[2] = add3_reduce(
+            mul(m20, s0, modulus),
+            mul(m21, s1, modulus),
+            mul(m22, s2, modulus),
             modulus,
         );
 
-        #[cfg(target_os = "zkvm")]
         zk_cycle_end!("zkvm_apply_mds");
     }
 
