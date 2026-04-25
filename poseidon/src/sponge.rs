@@ -100,8 +100,11 @@ where
     pub last_squeezed: Vec<u64>,
 }
 
-pub struct DefaultFrSponge<Fr: PrimeField + CanonicalSerialize + CanonicalDeserialize, SC: SpongeConstants, const FULL_ROUNDS: usize>
-{
+pub struct DefaultFrSponge<
+    Fr: PrimeField + CanonicalSerialize + CanonicalDeserialize,
+    SC: SpongeConstants,
+    const FULL_ROUNDS: usize,
+> {
     pub sponge: ArithmeticSponge<Fr, SC, FULL_ROUNDS>,
     pub last_squeezed: Vec<u64>,
 }
@@ -145,14 +148,18 @@ fn take_first_limbs(buf: &mut Vec<u64>, num_limbs: usize) -> Vec<u64> {
     out
 }
 
-impl<Fr: PrimeField + CanonicalSerialize + CanonicalDeserialize, SC: SpongeConstants, const FULL_ROUNDS: usize>
-    DefaultFrSponge<Fr, SC, FULL_ROUNDS>
+impl<
+        Fr: PrimeField + CanonicalSerialize + CanonicalDeserialize,
+        SC: SpongeConstants,
+        const FULL_ROUNDS: usize,
+    > DefaultFrSponge<Fr, SC, FULL_ROUNDS>
 {
     #[inline(always)]
     fn refill_limbs(&mut self) {
-        let x = self.sponge.squeeze().into_bigint();
+        let x = self.sponge.squeeze();
+        let limbs: [u64; 4] = unsafe { *(x.into_bigint().as_ref().as_ptr() as *const [u64; 4]) };
         self.last_squeezed
-            .extend_from_slice(&x.as_ref()[0..HIGH_ENTROPY_LIMBS]);
+            .extend_from_slice(&limbs[0..HIGH_ENTROPY_LIMBS]);
     }
 
     pub fn squeeze(&mut self, num_limbs: usize) -> Fr {
@@ -175,9 +182,10 @@ where
 {
     #[inline(always)]
     fn refill_limbs(&mut self) {
-        let x = self.sponge.squeeze().into_bigint();
+        let x = self.sponge.squeeze();
+        let limbs: [u64; 4] = unsafe { *(x.into_bigint().as_ref().as_ptr() as *const [u64; 4]) };
         self.last_squeezed
-            .extend_from_slice(&x.as_ref()[0..HIGH_ENTROPY_LIMBS]);
+            .extend_from_slice(&limbs[0..HIGH_ENTROPY_LIMBS]);
     }
 
     pub fn squeeze_limbs(&mut self, num_limbs: usize) -> Vec<u64> {
@@ -216,21 +224,14 @@ where
 
     fn absorb_g(&mut self, g: &[Affine<P>]) {
         self.last_squeezed.clear();
-
-        let mut buf = Vec::with_capacity(2 * g.len());
+        let zero = P::BaseField::zero();
         for point in g.iter() {
             if point.infinity {
-                // Absorb a fake point (0, 0).
-                let zero = P::BaseField::zero();
-                buf.push(zero);
-                buf.push(zero);
+                self.sponge.absorb(&[zero, zero]);
             } else {
-                buf.push(point.x);
-                buf.push(point.y);
+                self.sponge.absorb(&[point.x, point.y]);
             }
         }
-
-        self.sponge.absorb(&buf);
     }
 
     fn absorb_fq(&mut self, x: &[P::BaseField]) {
@@ -241,24 +242,16 @@ where
     fn absorb_fr(&mut self, x: &[P::ScalarField]) {
         self.last_squeezed.clear();
 
-        if <P::ScalarField as PrimeField>::MODULUS
-            < <P::BaseField as PrimeField>::MODULUS.into()
-        {
-            let mut buf = Vec::with_capacity(x.len());
-
+        if <P::ScalarField as PrimeField>::MODULUS < <P::BaseField as PrimeField>::MODULUS.into() {
             for scalar in x.iter() {
                 let bits = scalar.into_bigint().to_bits_le();
                 let fe = P::BaseField::from_bigint(
                     <P::BaseField as PrimeField>::BigInt::from_bits_le(&bits),
                 )
                 .expect("padding code has a bug");
-                buf.push(fe);
+                self.sponge.absorb(&[fe]);
             }
-
-            self.sponge.absorb(&buf);
         } else {
-            let mut buf = Vec::with_capacity(2 * x.len());
-
             for scalar in x.iter() {
                 let bits = scalar.into_bigint().to_bits_le();
 
@@ -273,11 +266,8 @@ where
                 )
                 .expect("padding code has a bug");
 
-                buf.push(high_bits);
-                buf.push(low_bit);
+                self.sponge.absorb(&[high_bits, low_bit]);
             }
-
-            self.sponge.absorb(&buf);
         }
     }
 
