@@ -37,7 +37,7 @@ pub mod permutation;
 pub mod poseidon;
 pub mod sponge;
 
-
+#[cfg(target_os = "zkvm")]
 pub mod sp1;
 
 pub use sponge::FqSponge; // Commonly used so reexported for convenience

@@ -104,8 +104,14 @@ where
 
     fn absorb_fq(&mut self, x: &[P::BaseField]) {
         self.last_squeezed.clear();
+
+        println!("cycle-tracker-start: sp1_absorb_fq_convert");
         let inputs: alloc::vec::Vec<Sp1Fp> = x.iter().map(|e| ark_to_sp1(*e)).collect();
+        println!("cycle-tracker-end: sp1_absorb_fq_convert");
+
+        println!("cycle-tracker-start: sp1_absorb_fq_inner");
         self.inner.absorb(&inputs);
+        println!("cycle-tracker-end: sp1_absorb_fq_inner");
     }
 
     fn absorb_g(&mut self, g: &[Affine<P>]) {
@@ -160,7 +166,16 @@ where
 
     fn challenge_fq(&mut self) -> P::BaseField {
         self.last_squeezed.clear();
-        sp1_to_ark(self.inner.squeeze())
+
+        println!("cycle-tracker-start: sp1_squeeze_inner");
+        let out = self.inner.squeeze();
+        println!("cycle-tracker-end: sp1_squeeze_inner");
+
+        println!("cycle-tracker-start: sp1_squeeze_convert");
+        let result = sp1_to_ark(out);
+        println!("cycle-tracker-end: sp1_squeeze_convert");
+
+        result
     }
 
     fn challenge(&mut self) -> P::ScalarField {
