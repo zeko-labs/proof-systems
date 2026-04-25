@@ -38,17 +38,19 @@ fn sp1_to_ark<F: PrimeField + CanonicalDeserialize>(x: Sp1Fp) -> F {
 // FqSponge wrapper
 // ---------------------------------------------------------------------------
 
+use core::marker::PhantomData;
+
 #[derive(Clone)]
-pub struct Sp1FqSponge<P: SWCurveConfig> {
-    inner: Sp1Sponge, // struct directement, pas de generic
+pub struct Sp1FqSponge<P: SWCurveConfig, SC = (), const FULL_ROUNDS: usize = 55> {
+    inner: Sp1Sponge,
     last_squeezed: alloc::vec::Vec<u64>,
-    _phantom: core::marker::PhantomData<P>,
+    _phantom: PhantomData<(P, SC)>,
 }
 
 pub struct Sp1FrSponge<Fr: PrimeField, SC = (), const FULL_ROUNDS: usize = 55> {
     inner: Sp1Sponge,
     last_squeezed: alloc::vec::Vec<u64>,
-    _phantom: core::marker::PhantomData<(Fr, SC)>,
+    _phantom: PhantomData<(Fr, SC)>,
 }
 
 impl<P: SWCurveConfig> Sp1FqSponge<P>
@@ -92,7 +94,7 @@ where
 {
     fn new(_params: &'static ArithmeticSpongeParams<P::BaseField, FULL_ROUNDS>) -> Self {
         Self {
-            inner: Sp1Sponge::new(), 
+            inner: Sp1Sponge::new(),
             last_squeezed: alloc::vec::Vec::new(),
             _phantom: core::marker::PhantomData,
         }
