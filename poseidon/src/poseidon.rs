@@ -7,7 +7,7 @@ use crate::{
     permutation::{full_round, poseidon_block_cipher},
 };
 use alloc::{vec, vec::Vec};
-use ark_ff::Field;
+use ark_ff::{Field, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 /// Cryptographic sponge interface - for hashing an arbitrary amount of
@@ -66,7 +66,9 @@ pub struct ArithmeticSponge<F: Field, SC: SpongeConstants, const FULL_ROUNDS: us
     pub constants: core::marker::PhantomData<SC>,
 }
 
-impl<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize> ArithmeticSponge<F, SC, FULL_ROUNDS> {
+impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
+    ArithmeticSponge<F, SC, FULL_ROUNDS>
+{
     pub fn full_round(&mut self, r: usize) {
         full_round::<F, SC, FULL_ROUNDS>(self.params, &mut self.state, r);
     }
@@ -76,7 +78,7 @@ impl<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize> ArithmeticSponge<F
     }
 }
 
-impl<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize> Sponge<F, F, FULL_ROUNDS>
+impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize> Sponge<F, F, FULL_ROUNDS>
     for ArithmeticSponge<F, SC, FULL_ROUNDS>
 {
     fn new(params: &'static ArithmeticSpongeParams<F, FULL_ROUNDS>) -> Self {

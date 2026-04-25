@@ -231,7 +231,7 @@ impl<F: PrimeField> CircuitGate<F> {
 ///
 /// Will panic if the `circuit` has `INITIAL_ARK`.
 #[allow(clippy::assertions_on_constants)]
-pub fn generate_witness<const FULL_ROUNDS: usize, F: Field>(
+pub fn generate_witness<const FULL_ROUNDS: usize, F: PrimeField>(
     row: usize,
     params: &'static ArithmeticSpongeParams<F, FULL_ROUNDS>,
     witness_cols: &mut [Vec<F>; COLUMNS],
