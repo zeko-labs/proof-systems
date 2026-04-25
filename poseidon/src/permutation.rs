@@ -57,9 +57,9 @@ pub(crate) fn full_round<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize
     state: &mut [F],
     r: usize,
 ) {
-    for s in &mut *state {
+    state.iter_mut().for_each(|s| {
         *s = sbox::<F, SC>(*s);
-    }
+    });
     let mds = params.mds;
 
     apply_mds_matrix::<F, SC>(mds, state);
@@ -114,34 +114,15 @@ pub fn half_rounds<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize>(
     }
 }
 
-/// Run a single instance of the Poseidon permutation.
-///
-/// # Arguments
-///
-/// * `params` - The Poseidon parameters containing the MDS matrix and round constants.
-/// * `state` - The state array to permute in place. Must have length
-///   [`SpongeConstants::SPONGE_WIDTH`] (e.g., `3` for
-///   [`PlonkSpongeConstantsKimchi`](crate::constants::PlonkSpongeConstantsKimchi)).
-///
-/// # Security
-///
-/// **NOTE:** Because this function can only be called with fixed-length input
-/// states of length [`SpongeConstants::SPONGE_WIDTH`], the function will not
-/// incur in trailing-zeros padding type of collisions.
-///
-/// # Panics
-///
-/// The function will panic if the length of the input state is not equal to the
-/// sponge width defined in the sponge constants.
-///
 pub fn poseidon_block_cipher<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize>(
     params: &ArithmeticSpongeParams<F, FULL_ROUNDS>,
     state: &mut [F],
 ) {
-    assert!(state.len() == SC::SPONGE_WIDTH);
-
     if SC::PERM_HALF_ROUNDS_FULL == 0 {
         if SC::PERM_INITIAL_ARK {
+            // maintaining previous invariants
+            assert!(params.round_constants[0].len() <= state.len());
+
             state
                 .iter_mut()
                 .zip(params.round_constants[0].iter())

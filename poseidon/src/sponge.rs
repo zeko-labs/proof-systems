@@ -91,6 +91,10 @@ impl<F: PrimeField> ScalarChallenge<F> {
     }
 }
 
+#[cfg(target_os = "zkvm")]
+pub type DefaultFqSponge<P, SC, const FULL_ROUNDS: usize> = crate::sp1_sponge::Sp1FqSponge<P>;
+
+#[cfg(not(target_os = "zkvm"))]
 #[derive(Clone)]
 pub struct DefaultFqSponge<P: SWCurveConfig, SC: SpongeConstants, const FULL_ROUNDS: usize>
 where

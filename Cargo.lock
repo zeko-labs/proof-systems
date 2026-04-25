@@ -2717,6 +2717,7 @@ dependencies = [
  "ark-serialize 0.5.0",
  "bytemuck",
  "criterion",
+ "crypto-bigint",
  "hex",
  "mina-curves",
  "o1-utils",
