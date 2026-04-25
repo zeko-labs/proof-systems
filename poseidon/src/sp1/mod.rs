@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use crypto_bigint::U256;
 use fp::Fp as Sp1Fp;
 use poseidon::Sponge as Sp1Sponge;
+use std;
 
 use crate::{
     constants::SpongeConstants,
