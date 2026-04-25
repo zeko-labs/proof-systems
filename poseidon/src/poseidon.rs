@@ -633,7 +633,7 @@ mod zkvm_fast {
         let x2 = mul(x, x, modulus);
         let x4 = mul(x2, x2, modulus);
         let x6 = mul(x4, x2, modulus);
-        mul(x6, x, modulus);
+        mul(x6, x, modulus)
     }
 
     #[inline(always)]
