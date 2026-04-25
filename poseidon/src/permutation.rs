@@ -1,54 +1,20 @@
+//! The permutation module contains the function implementing the permutation
+//! used in Poseidon.
+
+extern crate alloc;
+
 use crate::{
     constants::SpongeConstants,
     poseidon::{sbox, ArithmeticSpongeParams},
 };
-use ark_ff::{Field, PrimeField};
-
+use ark_ff::Field;
 const MDS_WIDTH: usize = 3;
-const KIMCHI_FULL_ROUNDS: usize = 55;
-
-const PALLAS_BASE_MODULUS: [u64; 4] = [
-    0x992d30ed00000001,
-    0x224698fc094cf91b,
-    0x0000000000000000,
-    0x4000000000000000,
-];
-
-const VESTA_BASE_MODULUS: [u64; 4] = [
-    0x8c46eb2100000001,
-    0x224698fc0994a8dd,
-    0x0000000000000000,
-    0x4000000000000000,
-];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PastaFieldKind {
-    PallasFp,
-    VestaFq,
-}
-
-#[inline(always)]
-fn detect_pasta_field<F: PrimeField>() -> Option<(PastaFieldKind, [u64; 4])> {
-    let ch = F::characteristic();
-    let modulus = [
-        ch.get(0).copied().unwrap_or(0),
-        ch.get(1).copied().unwrap_or(0),
-        ch.get(2).copied().unwrap_or(0),
-        ch.get(3).copied().unwrap_or(0),
-    ];
-
-    match modulus {
-        PALLAS_BASE_MODULUS => Some((PastaFieldKind::PallasFp, PALLAS_BASE_MODULUS)),
-        VESTA_BASE_MODULUS => Some((PastaFieldKind::VestaFq, VESTA_BASE_MODULUS)),
-        _ => None,
-    }
-}
 
 fn apply_mds_matrix<F: Field, SC: SpongeConstants>(
     mds: [[F; MDS_WIDTH]; MDS_WIDTH],
     state: &mut [F],
 ) {
-    // Fast path for the special MDS shape.
+    // optimization
     if !SC::PERM_FULL_MDS {
         let s0 = state[0];
         let s1 = state[1];
@@ -91,11 +57,12 @@ pub(crate) fn full_round<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize
     state: &mut [F],
     r: usize,
 ) {
-    state.iter_mut().for_each(|s| {
+    for s in &mut *state {
         *s = sbox::<F, SC>(*s);
-    });
+    }
+    let mds = params.mds;
 
-    apply_mds_matrix::<F, SC>(params.mds, state);
+    apply_mds_matrix::<F, SC>(mds, state);
 
     for (i, x) in params.round_constants[r].iter().enumerate() {
         state[i].add_assign(x);
@@ -125,8 +92,8 @@ pub fn half_rounds<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize>(
         {
             state[i].add_assign(x);
         }
-
         state[0] = sbox::<F, SC>(state[0]);
+
         apply_mds_matrix::<F, SC>(params.mds, state);
     }
 
@@ -147,20 +114,31 @@ pub fn half_rounds<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize>(
     }
 }
 
-pub fn poseidon_block_cipher<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>(
+/// Run a single instance of the Poseidon permutation.
+///
+/// # Arguments
+///
+/// * `params` - The Poseidon parameters containing the MDS matrix and round constants.
+/// * `state` - The state array to permute in place. Must have length
+///   [`SpongeConstants::SPONGE_WIDTH`] (e.g., `3` for
+///   [`PlonkSpongeConstantsKimchi`](crate::constants::PlonkSpongeConstantsKimchi)).
+///
+/// # Security
+///
+/// **NOTE:** Because this function can only be called with fixed-length input
+/// states of length [`SpongeConstants::SPONGE_WIDTH`], the function will not
+/// incur in trailing-zeros padding type of collisions.
+///
+/// # Panics
+///
+/// The function will panic if the length of the input state is not equal to the
+/// sponge width defined in the sponge constants.
+///
+pub fn poseidon_block_cipher<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize>(
     params: &ArithmeticSpongeParams<F, FULL_ROUNDS>,
     state: &mut [F],
 ) {
-    #[cfg(target_os = "zkvm")]
-    {
-        // Use the specialized SP1 path only for the Kimchi 55-round Pasta permutation.
-        if FULL_ROUNDS == KIMCHI_FULL_ROUNDS {
-            if let Some((field_kind, modulus)) = detect_pasta_field::<F>() {
-                sp1::permute_sp1::<F, SC, FULL_ROUNDS>(state, field_kind, modulus);
-                return;
-            }
-        }
-    }
+    assert!(state.len() == SC::SPONGE_WIDTH);
 
     if SC::PERM_HALF_ROUNDS_FULL == 0 {
         if SC::PERM_INITIAL_ARK {
@@ -181,256 +159,5 @@ pub fn poseidon_block_cipher<F: PrimeField, SC: SpongeConstants, const FULL_ROUN
         }
     } else {
         half_rounds::<_, SC, FULL_ROUNDS>(params, state);
-    }
-}
-
-#[cfg(target_os = "zkvm")]
-mod sp1 {
-    use super::*;
-    use crate::pasta::{fp_sp1, fq_sp1};
-    use ark_ff::PrimeField;
-    use core::array;
-
-    type Sp1Limbs = [u64; 4];
-
-    #[derive(Clone, Copy)]
-    #[repr(transparent)]
-    struct Sp1Fp(Sp1Limbs);
-
-    #[inline(always)]
-    fn from_ark<F: PrimeField>(x: F) -> Sp1Fp {
-        let bigint = x.into_bigint();
-        let limbs = bigint.as_ref();
-        debug_assert!(limbs.len() == 4);
-        Sp1Fp([limbs[0], limbs[1], limbs[2], limbs[3]])
-    }
-
-    #[inline(always)]
-    fn to_ark<F: PrimeField>(x: Sp1Fp) -> F {
-        let bytes: [u8; 32] = bytemuck::cast(x.0);
-        F::from_le_bytes_mod_order(&bytes)
-    }
-
-    #[inline(always)]
-    fn add(a: Sp1Fp, b: Sp1Fp, modulus: Sp1Limbs) -> Sp1Fp {
-        let mut carry = 0u64;
-        let mut out = [0u64; 4];
-
-        for i in 0..4 {
-            let (s1, c1) = a.0[i].overflowing_add(b.0[i]);
-            let (s2, c2) = s1.overflowing_add(carry);
-            out[i] = s2;
-            carry = (c1 as u64) + (c2 as u64);
-        }
-
-        let need_reduce = carry != 0 || {
-            let mut ge = true;
-            for i in (0..4).rev() {
-                if out[i] > modulus[i] {
-                    break;
-                }
-                if out[i] < modulus[i] {
-                    ge = false;
-                    break;
-                }
-            }
-            ge
-        };
-
-        if need_reduce {
-            let mut borrow = 0u64;
-            for i in 0..4 {
-                let (d1, b1) = out[i].overflowing_sub(modulus[i]);
-                let (d2, b2) = d1.overflowing_sub(borrow);
-                out[i] = d2;
-                borrow = (b1 as u64) + (b2 as u64);
-            }
-        }
-
-        Sp1Fp(out)
-    }
-
-    #[inline(always)]
-    fn mul(a: Sp1Fp, b: Sp1Fp, modulus: Sp1Limbs) -> Sp1Fp {
-        let mut out = [0u64; 4];
-        #[allow(unsafe_code)]
-        unsafe {
-            sp1_lib::sys_bigint(&mut out, 0, &a.0, &b.0, &modulus);
-        }
-        Sp1Fp(out)
-    }
-
-    #[inline(always)]
-    fn pow7(x: Sp1Fp, modulus: Sp1Limbs) -> Sp1Fp {
-        let x2 = mul(x, x, modulus);
-        let x4 = mul(x2, x2, modulus);
-        let x6 = mul(x4, x2, modulus);
-        mul(x6, x, modulus)
-    }
-
-    #[inline(always)]
-    fn apply_mds_matrix_sp1<SC: SpongeConstants>(
-        mds: &[[Sp1Limbs; 3]; 3],
-        state: &mut [Sp1Fp; 3],
-        modulus: Sp1Limbs,
-    ) {
-        // Fast path for the special MDS shape.
-        if !SC::PERM_FULL_MDS {
-            let s0 = state[0];
-            let s1 = state[1];
-            let s2 = state[2];
-
-            state[0] = add(s0, s2, modulus);
-            state[1] = add(s0, s1, modulus);
-            state[2] = add(s1, s2, modulus);
-            return;
-        }
-
-        let tmp = *state;
-
-        state[0] = add(
-            add(
-                mul(Sp1Fp(mds[0][0]), tmp[0], modulus),
-                mul(Sp1Fp(mds[0][1]), tmp[1], modulus),
-                modulus,
-            ),
-            mul(Sp1Fp(mds[0][2]), tmp[2], modulus),
-            modulus,
-        );
-
-        state[1] = add(
-            add(
-                mul(Sp1Fp(mds[1][0]), tmp[0], modulus),
-                mul(Sp1Fp(mds[1][1]), tmp[1], modulus),
-                modulus,
-            ),
-            mul(Sp1Fp(mds[1][2]), tmp[2], modulus),
-            modulus,
-        );
-
-        state[2] = add(
-            add(
-                mul(Sp1Fp(mds[2][0]), tmp[0], modulus),
-                mul(Sp1Fp(mds[2][1]), tmp[1], modulus),
-                modulus,
-            ),
-            mul(Sp1Fp(mds[2][2]), tmp[2], modulus),
-            modulus,
-        );
-    }
-
-    #[inline(always)]
-    fn full_round_sp1<SC: SpongeConstants>(
-        state: &mut [Sp1Fp; 3],
-        mds: &[[Sp1Limbs; 3]; 3],
-        rc: &[Sp1Limbs; 3],
-        modulus: Sp1Limbs,
-    ) {
-        state[0] = pow7(state[0], modulus);
-        state[1] = pow7(state[1], modulus);
-        state[2] = pow7(state[2], modulus);
-
-        apply_mds_matrix_sp1::<SC>(mds, state, modulus);
-
-        state[0] = add(state[0], Sp1Fp(rc[0]), modulus);
-        state[1] = add(state[1], Sp1Fp(rc[1]), modulus);
-        state[2] = add(state[2], Sp1Fp(rc[2]), modulus);
-    }
-
-    #[inline(always)]
-    fn half_rounds_sp1<SC: SpongeConstants>(
-        mds: &[[Sp1Limbs; 3]; 3],
-        rc: &[[Sp1Limbs; 3]; KIMCHI_FULL_ROUNDS],
-        state: &mut [Sp1Fp; 3],
-        modulus: Sp1Limbs,
-    ) {
-        for r in 0..SC::PERM_HALF_ROUNDS_FULL {
-            state[0] = add(state[0], Sp1Fp(rc[r][0]), modulus);
-            state[1] = add(state[1], Sp1Fp(rc[r][1]), modulus);
-            state[2] = add(state[2], Sp1Fp(rc[r][2]), modulus);
-
-            state[0] = pow7(state[0], modulus);
-            state[1] = pow7(state[1], modulus);
-            state[2] = pow7(state[2], modulus);
-
-            apply_mds_matrix_sp1::<SC>(mds, state, modulus);
-        }
-
-        for r in 0..SC::PERM_ROUNDS_PARTIAL {
-            let rr = SC::PERM_HALF_ROUNDS_FULL + r;
-
-            state[0] = add(state[0], Sp1Fp(rc[rr][0]), modulus);
-            state[1] = add(state[1], Sp1Fp(rc[rr][1]), modulus);
-            state[2] = add(state[2], Sp1Fp(rc[rr][2]), modulus);
-
-            state[0] = pow7(state[0], modulus);
-
-            apply_mds_matrix_sp1::<SC>(mds, state, modulus);
-        }
-
-        for r in 0..SC::PERM_HALF_ROUNDS_FULL {
-            let rr = SC::PERM_HALF_ROUNDS_FULL + SC::PERM_ROUNDS_PARTIAL + r;
-
-            state[0] = add(state[0], Sp1Fp(rc[rr][0]), modulus);
-            state[1] = add(state[1], Sp1Fp(rc[rr][1]), modulus);
-            state[2] = add(state[2], Sp1Fp(rc[rr][2]), modulus);
-
-            state[0] = pow7(state[0], modulus);
-            state[1] = pow7(state[1], modulus);
-            state[2] = pow7(state[2], modulus);
-
-            apply_mds_matrix_sp1::<SC>(mds, state, modulus);
-        }
-    }
-
-    #[inline(always)]
-    fn permute_with_constants<F: PrimeField + Copy, SC: SpongeConstants>(
-        state: &mut [F],
-        mds: &[[Sp1Limbs; 3]; 3],
-        rc: &[[Sp1Limbs; 3]; KIMCHI_FULL_ROUNDS],
-        modulus: Sp1Limbs,
-    ) {
-        debug_assert_eq!(state.len(), 3);
-
-        let mut s: [Sp1Fp; 3] = array::from_fn(|i| from_ark(state[i]));
-
-        if SC::PERM_HALF_ROUNDS_FULL == 0 {
-            if SC::PERM_INITIAL_ARK {
-                s[0] = add(s[0], Sp1Fp(rc[0][0]), modulus);
-                s[1] = add(s[1], Sp1Fp(rc[0][1]), modulus);
-                s[2] = add(s[2], Sp1Fp(rc[0][2]), modulus);
-
-                for r in 0..SC::PERM_ROUNDS_FULL {
-                    full_round_sp1::<SC>(&mut s, mds, &rc[r + 1], modulus);
-                }
-            } else {
-                for r in 0..SC::PERM_ROUNDS_FULL {
-                    full_round_sp1::<SC>(&mut s, mds, &rc[r], modulus);
-                }
-            }
-        } else {
-            half_rounds_sp1::<SC>(mds, rc, &mut s, modulus);
-        }
-
-        state[0] = to_ark(s[0]);
-        state[1] = to_ark(s[1]);
-        state[2] = to_ark(s[2]);
-    }
-
-    pub fn permute_sp1<F: PrimeField + Copy, SC: SpongeConstants, const FULL_ROUNDS: usize>(
-        state: &mut [F],
-        field_kind: PastaFieldKind,
-        modulus: Sp1Limbs,
-    ) {
-        debug_assert_eq!(FULL_ROUNDS, KIMCHI_FULL_ROUNDS);
-
-        match field_kind {
-            PastaFieldKind::PallasFp => {
-                permute_with_constants::<F, SC>(state, &fp_sp1::MDS, &fp_sp1::ROUND_CONSTANTS, modulus);
-            }
-            PastaFieldKind::VestaFq => {
-                permute_with_constants::<F, SC>(state, &fq_sp1::MDS, &fq_sp1::ROUND_CONSTANTS, modulus);
-            }
-        }
     }
 }
