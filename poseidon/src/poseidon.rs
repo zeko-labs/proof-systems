@@ -7,7 +7,7 @@ use crate::{
     permutation::{full_round, poseidon_block_cipher},
 };
 use alloc::{vec, vec::Vec};
-use ark_ff::{BigInt, Field, PrimeField};
+use ark_ff::{Field, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 #[cfg(target_os = "zkvm")]
@@ -477,28 +477,16 @@ mod zkvm_fast {
     pub(crate) struct Sp1Fp(pub(crate) Sp1Limbs);
 
     #[inline(always)]
-    pub(crate) fn from_ark<F: PrimeField>(x: F) -> Sp1Fp {
-        let bigint = x.into_bigint();
-        let limbs = bigint.as_ref();
-
-        debug_assert!(limbs.len() == 4);
-
-        Sp1Fp([limbs[0], limbs[1], limbs[2], limbs[3]])
+    pub(crate) fn from_ark<F: PrimeField + CanonicalSerialize>(x: F) -> Sp1Fp {
+        let mut buf = [0u8; 32];
+        x.serialize_uncompressed(&mut buf[..]).unwrap();
+        Sp1Fp(bytemuck::cast(buf))
     }
 
     #[inline(always)]
-    pub(crate) fn to_ark<F: PrimeField>(x: Sp1Fp) -> F {
-        let mut repr = F::BigInt::default();
-        let limbs = repr.as_mut();
-
-        debug_assert!(limbs.len() == 4);
-
-        limbs[0] = x.0[0];
-        limbs[1] = x.0[1];
-        limbs[2] = x.0[2];
-        limbs[3] = x.0[3];
-
-        F::from_bigint(repr).expect("SP1 limbs must encode a valid Pasta field element")
+    pub(crate) fn to_ark<F: PrimeField + CanonicalDeserialize>(x: Sp1Fp) -> F {
+        let buf: [u8; 32] = bytemuck::cast(x.0);
+        F::deserialize_uncompressed(&buf[..]).unwrap()
     }
 
     #[inline(always)]
