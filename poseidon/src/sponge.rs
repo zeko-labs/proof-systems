@@ -156,10 +156,9 @@ impl<
 {
     #[inline(always)]
     fn refill_limbs(&mut self) {
-        let x = self.sponge.squeeze();
-        let limbs: [u64; 4] = unsafe { *(x.into_bigint().as_ref().as_ptr() as *const [u64; 4]) };
+        let x = self.sponge.squeeze().into_bigint();
         self.last_squeezed
-            .extend_from_slice(&limbs[0..HIGH_ENTROPY_LIMBS]);
+            .extend_from_slice(&x.as_ref()[0..HIGH_ENTROPY_LIMBS]);
     }
 
     pub fn squeeze(&mut self, num_limbs: usize) -> Fr {
@@ -225,17 +224,13 @@ where
     fn absorb_g(&mut self, g: &[Affine<P>]) {
         self.last_squeezed.clear();
         let zero = P::BaseField::zero();
-        let mut buf = alloc::vec::Vec::with_capacity(2 * g.len());
         for point in g.iter() {
             if point.infinity {
-                buf.push(zero);
-                buf.push(zero);
+                self.sponge.absorb(&[zero, zero]);
             } else {
-                buf.push(point.x);
-                buf.push(point.y);
+                self.sponge.absorb(&[point.x, point.y]);
             }
         }
-        self.sponge.absorb(&buf);
     }
 
     fn absorb_fq(&mut self, x: &[P::BaseField]) {
@@ -247,33 +242,31 @@ where
         self.last_squeezed.clear();
 
         if <P::ScalarField as PrimeField>::MODULUS < <P::BaseField as PrimeField>::MODULUS.into() {
-            let mut buf = alloc::vec::Vec::with_capacity(x.len());
             for scalar in x.iter() {
                 let bits = scalar.into_bigint().to_bits_le();
                 let fe = P::BaseField::from_bigint(
                     <P::BaseField as PrimeField>::BigInt::from_bits_le(&bits),
                 )
                 .expect("padding code has a bug");
-                buf.push(fe);
+                self.sponge.absorb(&[fe]);
             }
-            self.sponge.absorb(&buf);
         } else {
-            let mut buf = alloc::vec::Vec::with_capacity(2 * x.len());
             for scalar in x.iter() {
                 let bits = scalar.into_bigint().to_bits_le();
+
                 let low_bit = if bits[0] {
                     P::BaseField::one()
                 } else {
                     P::BaseField::zero()
                 };
+
                 let high_bits = P::BaseField::from_bigint(
                     <P::BaseField as PrimeField>::BigInt::from_bits_le(&bits[1..bits.len()]),
                 )
                 .expect("padding code has a bug");
-                buf.push(high_bits);
-                buf.push(low_bit);
+
+                self.sponge.absorb(&[high_bits, low_bit]);
             }
-            self.sponge.absorb(&buf);
         }
     }
 

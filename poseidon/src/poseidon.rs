@@ -477,16 +477,16 @@ mod zkvm_fast {
     pub(crate) struct Sp1Fp(pub(crate) Sp1Limbs);
 
     #[inline(always)]
-    pub(crate) fn from_ark<F: PrimeField>(x: F) -> Sp1Fp {
-        let limbs: [u64; 4] = unsafe { *(x.into_bigint().as_ref().as_ptr() as *const [u64; 4]) };
-        Sp1Fp(limbs)
+    pub(crate) fn from_ark<F: PrimeField + CanonicalSerialize>(x: F) -> Sp1Fp {
+        let mut buf = [0u8; 32];
+        x.serialize_uncompressed(&mut buf[..]).unwrap();
+        Sp1Fp(bytemuck::cast(buf))
     }
 
     #[inline(always)]
-    pub(crate) fn to_ark<F: PrimeField>(x: Sp1Fp) -> F {
-        let mut bi = F::BigInt::default();
-        bi.as_mut().copy_from_slice(&x.0);
-        F::from_bigint(bi).unwrap()
+    pub(crate) fn to_ark<F: PrimeField + CanonicalDeserialize>(x: Sp1Fp) -> F {
+        let buf: [u8; 32] = bytemuck::cast(x.0);
+        F::deserialize_uncompressed(&buf[..]).unwrap()
     }
 
     #[inline(always)]
