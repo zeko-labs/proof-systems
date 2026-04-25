@@ -100,6 +100,8 @@ pub struct ArithmeticSponge<F: Field, SC: SpongeConstants, const FULL_ROUNDS: us
     pub constants: core::marker::PhantomData<SC>,
     #[cfg(target_os = "zkvm")]
     sp1_cache: Option<Sp1StateCache>,
+    #[cfg(target_os = "zkvm")]
+    sp1_state_stale: bool,
 }
 
 #[cfg(target_os = "zkvm")]
@@ -145,33 +147,61 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
             for i in 0..3 {
                 cache.state[i] = zkvm_fast::from_ark(self.state[i]).0;
             }
+            self.sp1_state_stale = false;
         }
     }
 
     #[cfg(target_os = "zkvm")]
     #[inline(always)]
-    fn sync_state_from_cache(&mut self) {
+    fn ensure_state_synced_from_cache(&mut self) {
+        if !self.sp1_state_stale {
+            return;
+        }
+
         if let Some(cache) = self.sp1_cache.as_ref() {
             debug_assert!(self.state.len() >= 3);
             for i in 0..3 {
                 self.state[i] = zkvm_fast::to_ark(zkvm_fast::Sp1Fp(cache.state[i]));
             }
+            self.sp1_state_stale = false;
         }
+    }
+
+    #[cfg(target_os = "zkvm")]
+    #[inline(always)]
+    fn read_state_slot(&self, idx: usize) -> F {
+        if self.sp1_state_stale {
+            if let Some(cache) = self.sp1_cache.as_ref() {
+                return zkvm_fast::to_ark(zkvm_fast::Sp1Fp(cache.state[idx]));
+            }
+        }
+        self.state[idx]
     }
 
     #[inline(always)]
     fn add_to_state_slot(&mut self, idx: usize, x: F) {
-        self.state[idx].add_assign(&x);
-
         #[cfg(target_os = "zkvm")]
-        if let Some(cache) = self.sp1_cache.as_mut() {
-            let x_limbs = zkvm_fast::from_ark(x);
-            let cur = zkvm_fast::Sp1Fp(cache.state[idx]);
-            cache.state[idx] = zkvm_fast::add(cur, x_limbs, cache.modulus).0;
+        {
+            if let Some(cache) = self.sp1_cache.as_mut() {
+                let x_limbs = zkvm_fast::from_ark(x);
+                let cur = zkvm_fast::Sp1Fp(cache.state[idx]);
+                cache.state[idx] = zkvm_fast::add(cur, x_limbs, cache.modulus).0;
+
+                if !self.sp1_state_stale {
+                    self.state[idx].add_assign(&x);
+                }
+
+                return;
+            }
         }
+
+        self.state[idx].add_assign(&x);
     }
 
     pub fn full_round(&mut self, r: usize) {
+        #[cfg(target_os = "zkvm")]
+        self.ensure_state_synced_from_cache();
+
         full_round::<F, SC, FULL_ROUNDS>(self.params, &mut self.state, r);
 
         #[cfg(target_os = "zkvm")]
@@ -186,7 +216,7 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
                 cache.field_kind,
                 cache.modulus,
             );
-            self.sync_state_from_cache();
+            self.sp1_state_stale = true;
             return;
         }
 
@@ -218,6 +248,8 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize> Sponge<F, F, 
             constants: core::marker::PhantomData,
             #[cfg(target_os = "zkvm")]
             sp1_cache: Self::maybe_new_sp1_cache(),
+            #[cfg(target_os = "zkvm")]
+            sp1_state_stale: false,
         }
     }
 
@@ -248,16 +280,37 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize> Sponge<F, F, 
                 if n == self.rate {
                     self.poseidon_block_cipher();
                     self.sponge_state = SpongeState::Squeezed(1);
-                    self.state[0]
+                    #[cfg(target_os = "zkvm")]
+                    {
+                        return self.read_state_slot(0);
+                    }
+                    #[cfg(not(target_os = "zkvm"))]
+                    {
+                        return self.state[0];
+                    }
                 } else {
                     self.sponge_state = SpongeState::Squeezed(n + 1);
-                    self.state[n]
+                    #[cfg(target_os = "zkvm")]
+                    {
+                        return self.read_state_slot(n);
+                    }
+                    #[cfg(not(target_os = "zkvm"))]
+                    {
+                        return self.state[n];
+                    }
                 }
             }
             SpongeState::Absorbed(_) => {
                 self.poseidon_block_cipher();
                 self.sponge_state = SpongeState::Squeezed(1);
-                self.state[0]
+                #[cfg(target_os = "zkvm")]
+                {
+                    return self.read_state_slot(0);
+                }
+                #[cfg(not(target_os = "zkvm"))]
+                {
+                    return self.state[0];
+                }
             }
         }
     }
@@ -267,8 +320,11 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize> Sponge<F, F, 
         self.sponge_state = SpongeState::Absorbed(0);
 
         #[cfg(target_os = "zkvm")]
-        if let Some(cache) = self.sp1_cache.as_mut() {
-            cache.state = [[0u64; 4]; 3];
+        {
+            if let Some(cache) = self.sp1_cache.as_mut() {
+                cache.state = [[0u64; 4]; 3];
+            }
+            self.sp1_state_stale = false;
         }
     }
 }
