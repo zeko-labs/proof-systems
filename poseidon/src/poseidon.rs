@@ -89,6 +89,16 @@ struct Sp1StateCache {
     state: [[u64; 4]; 3],
 }
 
+#[cfg(target_os = "zkvm")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FastKimchiPhase {
+    Absorbed0,
+    Absorbed1,
+    Absorbed2,
+    Squeezed1,
+    Squeezed2,
+}
+
 #[derive(Clone)]
 pub struct ArithmeticSponge<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize> {
     pub sponge_state: SpongeState,
@@ -100,6 +110,8 @@ pub struct ArithmeticSponge<F: Field, SC: SpongeConstants, const FULL_ROUNDS: us
     sp1_cache: Option<Sp1StateCache>,
     #[cfg(target_os = "zkvm")]
     sp1_state_stale: bool,
+    #[cfg(target_os = "zkvm")]
+    fast_kimchi_phase: Option<FastKimchiPhase>,
 }
 
 #[cfg(target_os = "zkvm")]
@@ -139,8 +151,31 @@ impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: 
 
     #[cfg(target_os = "zkvm")]
     #[inline(always)]
-    fn has_fast_sp1_rate2_path(&self) -> bool {
-        self.sp1_cache.is_some() && FULL_ROUNDS == KIMCHI_FULL_ROUNDS && self.rate == 2
+    fn maybe_new_fast_phase(rate: usize, has_cache: bool) -> Option<FastKimchiPhase> {
+        if has_cache && FULL_ROUNDS == KIMCHI_FULL_ROUNDS && rate == 2 {
+            Some(FastKimchiPhase::Absorbed0)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(target_os = "zkvm")]
+    #[inline(always)]
+    fn has_fast_kimchi_path(&self) -> bool {
+        self.fast_kimchi_phase.is_some()
+    }
+
+    #[cfg(target_os = "zkvm")]
+    #[inline(always)]
+    fn set_fast_phase(&mut self, phase: FastKimchiPhase) {
+        self.fast_kimchi_phase = Some(phase);
+        self.sponge_state = match phase {
+            FastKimchiPhase::Absorbed0 => SpongeState::Absorbed(0),
+            FastKimchiPhase::Absorbed1 => SpongeState::Absorbed(1),
+            FastKimchiPhase::Absorbed2 => SpongeState::Absorbed(2),
+            FastKimchiPhase::Squeezed1 => SpongeState::Squeezed(1),
+            FastKimchiPhase::Squeezed2 => SpongeState::Squeezed(2),
+        };
     }
 
     #[cfg(target_os = "zkvm")]
@@ -173,13 +208,9 @@ impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: 
 
     #[cfg(target_os = "zkvm")]
     #[inline(always)]
-    fn read_state_slot(&self, idx: usize) -> F {
-        if self.sp1_state_stale {
-            if let Some(cache) = self.sp1_cache.as_ref() {
-                return zkvm_fast::to_ark::<F>(zkvm_fast::Sp1Fp(cache.state[idx]));
-            }
-        }
-        self.state[idx]
+    fn read_cache_slot(&self, idx: usize) -> F {
+        let cache = self.sp1_cache.as_ref().unwrap();
+        zkvm_fast::to_ark::<F>(zkvm_fast::Sp1Fp(cache.state[idx]))
     }
 
     #[cfg(target_os = "zkvm")]
@@ -194,33 +225,41 @@ impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: 
 
     #[cfg(target_os = "zkvm")]
     #[inline(always)]
-    fn absorb_fast_sp1_rate2(&mut self, inputs: &[F]) -> bool {
-        if !self.has_fast_sp1_rate2_path() {
+    fn poseidon_block_cipher_fast(&mut self) {
+        let cache = self.sp1_cache.as_mut().unwrap();
+        zkvm_fast::permute_state::<SC, FULL_ROUNDS>(
+            &mut cache.state,
+            cache.field_kind,
+            cache.modulus,
+        );
+        self.sp1_state_stale = true;
+    }
+
+    #[cfg(target_os = "zkvm")]
+    #[inline(always)]
+    fn absorb_fast_kimchi(&mut self, inputs: &[F]) -> bool {
+        if !self.has_fast_kimchi_path() {
             return false;
         }
 
         for x in inputs.iter().copied() {
-            match self.sponge_state {
-                SpongeState::Absorbed(0) => {
+            match self.fast_kimchi_phase.unwrap() {
+                FastKimchiPhase::Absorbed0 => {
                     self.cache_add_to_slot(0, x);
-                    self.sponge_state = SpongeState::Absorbed(1);
+                    self.set_fast_phase(FastKimchiPhase::Absorbed1);
                 }
-                SpongeState::Absorbed(1) => {
+                FastKimchiPhase::Absorbed1 => {
                     self.cache_add_to_slot(1, x);
-                    self.sponge_state = SpongeState::Absorbed(2);
+                    self.set_fast_phase(FastKimchiPhase::Absorbed2);
                 }
-                SpongeState::Absorbed(2) => {
-                    self.poseidon_block_cipher();
+                FastKimchiPhase::Absorbed2 => {
+                    self.poseidon_block_cipher_fast();
                     self.cache_add_to_slot(0, x);
-                    self.sponge_state = SpongeState::Absorbed(1);
+                    self.set_fast_phase(FastKimchiPhase::Absorbed1);
                 }
-                SpongeState::Squeezed(_) => {
+                FastKimchiPhase::Squeezed1 | FastKimchiPhase::Squeezed2 => {
                     self.cache_add_to_slot(0, x);
-                    self.sponge_state = SpongeState::Absorbed(1);
-                }
-                SpongeState::Absorbed(_) => {
-                    self.ensure_state_synced_from_cache();
-                    return false;
+                    self.set_fast_phase(FastKimchiPhase::Absorbed1);
                 }
             }
         }
@@ -230,33 +269,29 @@ impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: 
 
     #[cfg(target_os = "zkvm")]
     #[inline(always)]
-    fn squeeze_fast_sp1_rate2(&mut self) -> Option<F> {
-        if !self.has_fast_sp1_rate2_path() {
+    fn squeeze_fast_kimchi(&mut self) -> Option<F> {
+        if !self.has_fast_kimchi_path() {
             return None;
         }
 
-        let out = match self.sponge_state {
-            SpongeState::Squeezed(1) => {
-                self.sponge_state = SpongeState::Squeezed(2);
-                self.read_state_slot(1)
+        match self.fast_kimchi_phase.unwrap() {
+            FastKimchiPhase::Absorbed0
+            | FastKimchiPhase::Absorbed1
+            | FastKimchiPhase::Absorbed2 => {
+                self.poseidon_block_cipher_fast();
+                self.set_fast_phase(FastKimchiPhase::Squeezed1);
+                Some(self.read_cache_slot(0))
             }
-            SpongeState::Squeezed(2) => {
-                self.poseidon_block_cipher();
-                self.sponge_state = SpongeState::Squeezed(1);
-                self.read_state_slot(0)
+            FastKimchiPhase::Squeezed1 => {
+                self.set_fast_phase(FastKimchiPhase::Squeezed2);
+                Some(self.read_cache_slot(1))
             }
-            SpongeState::Absorbed(_) => {
-                self.poseidon_block_cipher();
-                self.sponge_state = SpongeState::Squeezed(1);
-                self.read_state_slot(0)
+            FastKimchiPhase::Squeezed2 => {
+                self.poseidon_block_cipher_fast();
+                self.set_fast_phase(FastKimchiPhase::Squeezed1);
+                Some(self.read_cache_slot(0))
             }
-            SpongeState::Squeezed(_) => {
-                self.ensure_state_synced_from_cache();
-                return None;
-            }
-        };
-
-        Some(out)
+        }
     }
 
     #[inline(always)]
@@ -281,7 +316,12 @@ impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: 
 
     pub fn full_round(&mut self, r: usize) {
         #[cfg(target_os = "zkvm")]
-        self.ensure_state_synced_from_cache();
+        {
+            self.ensure_state_synced_from_cache();
+            if self.has_fast_kimchi_path() {
+                self.fast_kimchi_phase = None;
+            }
+        }
 
         full_round::<F, SC, FULL_ROUNDS>(self.params, &mut self.state, r);
 
@@ -290,6 +330,12 @@ impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: 
     }
 
     pub fn poseidon_block_cipher(&mut self) {
+        #[cfg(target_os = "zkvm")]
+        if self.has_fast_kimchi_path() {
+            self.poseidon_block_cipher_fast();
+            return;
+        }
+
         #[cfg(target_os = "zkvm")]
         if let Some(cache) = self.sp1_cache.as_mut() {
             zkvm_fast::permute_state::<SC, FULL_ROUNDS>(
@@ -316,10 +362,15 @@ impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: 
         let rate = SC::SPONGE_RATE;
 
         let mut state = Vec::with_capacity(capacity + rate);
-
         for _ in 0..(capacity + rate) {
             state.push(F::zero());
         }
+
+        #[cfg(target_os = "zkvm")]
+        let sp1_cache = Self::maybe_new_sp1_cache();
+
+        #[cfg(target_os = "zkvm")]
+        let fast_kimchi_phase = Self::maybe_new_fast_phase(rate, sp1_cache.is_some());
 
         Self {
             state,
@@ -328,15 +379,17 @@ impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: 
             params,
             constants: core::marker::PhantomData,
             #[cfg(target_os = "zkvm")]
-            sp1_cache: Self::maybe_new_sp1_cache(),
+            sp1_cache,
             #[cfg(target_os = "zkvm")]
             sp1_state_stale: false,
+            #[cfg(target_os = "zkvm")]
+            fast_kimchi_phase,
         }
     }
 
     fn absorb(&mut self, x: &[F]) {
         #[cfg(target_os = "zkvm")]
-        if self.absorb_fast_sp1_rate2(x) {
+        if self.absorb_fast_kimchi(x) {
             return;
         }
 
@@ -362,7 +415,7 @@ impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: 
 
     fn squeeze(&mut self) -> F {
         #[cfg(target_os = "zkvm")]
-        if let Some(out) = self.squeeze_fast_sp1_rate2() {
+        if let Some(out) = self.squeeze_fast_kimchi() {
             return out;
         }
 
@@ -395,6 +448,9 @@ impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: 
                 cache.state = [[0u64; 4]; 3];
             }
             self.sp1_state_stale = false;
+            if self.fast_kimchi_phase.is_some() {
+                self.fast_kimchi_phase = Some(FastKimchiPhase::Absorbed0);
+            }
         }
     }
 }
@@ -412,13 +468,11 @@ mod zkvm_fast {
 
     #[inline(always)]
     pub(crate) fn from_ark<F: PrimeField<BigInt = BigInt<4>>>(x: F) -> Sp1Fp {
-        // Uses the patched zkVM `into_bigint` directly.
         Sp1Fp(x.into_bigint().0)
     }
 
     #[inline(always)]
     pub(crate) fn to_ark<F: PrimeField<BigInt = BigInt<4>>>(x: Sp1Fp) -> F {
-        // Uses the patched zkVM `from_bigint` directly.
         F::from_bigint(BigInt::<4>(x.0)).unwrap()
     }
 
