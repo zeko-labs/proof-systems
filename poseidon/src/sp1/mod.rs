@@ -1,124 +1,148 @@
-// mina-poseidon/src/sp1/mod.rs
-
 mod fp;
 mod params;
 mod poseidon;
 
 use alloc::vec::Vec;
-use crypto_bigint::U256;
-use fp::Fp as Sp1Fp;
-use poseidon::Sponge as Sp1Sponge;
-use std::fmt::Debug;
+use core::marker::PhantomData;
 
-use crate::{
-    constants::SpongeConstants,
-    poseidon::ArithmeticSpongeParams,
-    sponge::{FqSponge, ScalarChallenge, CHALLENGE_LENGTH_IN_LIMBS},
-};
 use ark_ec::models::short_weierstrass::{Affine, SWCurveConfig};
 use ark_ff::{BigInteger, One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-// ---------------------------------------------------------------------------
-// Conversions ark ↔ Sp1Fp
-// ---------------------------------------------------------------------------
+use fp::Fp as Sp1Fp;
+use poseidon::Sponge as Sp1Sponge;
+
+use crate::{
+    poseidon::ArithmeticSpongeParams,
+    sponge::{FqSponge, ScalarChallenge, CHALLENGE_LENGTH_IN_LIMBS},
+};
+
+// -----------------------------------------------------------------------------
+// ark <-> SP1 field conversions
+// -----------------------------------------------------------------------------
 
 #[inline(always)]
-fn ark_to_sp1<F: ark_ff::PrimeField>(x: F) -> Sp1Fp {
-    let limbs: [u64; 4] = unsafe { *(x.into_bigint().as_ref().as_ptr() as *const [u64; 4]) };
-    Sp1Fp::from_le_limbs(limbs)
+fn ark_to_sp1<F: PrimeField>(x: F) -> Sp1Fp {
+    let limbs = x.into_bigint();
+    let limbs = limbs.as_ref();
+
+    Sp1Fp::from_le_limbs([limbs[0], limbs[1], limbs[2], limbs[3]])
 }
 
 #[inline(always)]
-fn sp1_to_ark<F: ark_ff::PrimeField>(x: Sp1Fp) -> F {
+fn sp1_to_ark<F: PrimeField>(x: Sp1Fp) -> F {
     let limbs = x.to_le_limbs();
-    let mut bi = F::BigInt::default();
-    bi.as_mut().copy_from_slice(&limbs);
-    F::from_bigint(bi).unwrap()
+
+    let mut bigint = F::BigInt::default();
+    bigint.as_mut().copy_from_slice(&limbs);
+
+    F::from_bigint(bigint).expect("SP1 field element is not valid in ark field")
 }
 
-// ---------------------------------------------------------------------------
-// FqSponge wrapper
-// ---------------------------------------------------------------------------
+#[inline(always)]
+fn pack<B: BigInteger>(limbs_lsb: &[u64]) -> B {
+    let mut res: B = 0u64.into();
 
-use core::marker::PhantomData;
+    for &x in limbs_lsb.iter().rev() {
+        res <<= 64;
+        res.add_with_carry(&x.into());
+    }
+
+    res
+}
+
+#[inline(always)]
+fn take_first_limbs(buf: &mut Vec<u64>, num_limbs: usize) -> Vec<u64> {
+    debug_assert!(buf.len() >= num_limbs);
+
+    let out = buf[..num_limbs].to_vec();
+    let remaining = buf[num_limbs..].to_vec();
+
+    *buf = remaining;
+
+    out
+}
+
+// -----------------------------------------------------------------------------
+// Fq sponge wrapper
+// -----------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct Sp1FqSponge<P: SWCurveConfig, SC = (), const FULL_ROUNDS: usize = 55> {
-    inner: Sp1Sponge,
-    last_squeezed: alloc::vec::Vec<u64>,
+    pub sponge: Sp1Sponge,
+    pub last_squeezed: Vec<u64>,
     _phantom: PhantomData<(P, SC)>,
 }
 
-pub struct Sp1FrSponge<Fr: PrimeField, SC = (), const FULL_ROUNDS: usize = 55> {
-    inner: Sp1Sponge,
-    last_squeezed: alloc::vec::Vec<u64>,
-    _phantom: PhantomData<(Fr, SC)>,
-}
-
-impl<P: SWCurveConfig> Sp1FqSponge<P>
+impl<P, SC, const FULL_ROUNDS: usize> Sp1FqSponge<P, SC, FULL_ROUNDS>
 where
+    P: SWCurveConfig,
     P::BaseField: PrimeField + CanonicalSerialize + CanonicalDeserialize,
-    P::ScalarField: PrimeField,
+    P::ScalarField: PrimeField + CanonicalSerialize + CanonicalDeserialize,
     <P::BaseField as PrimeField>::BigInt: Into<<P::ScalarField as PrimeField>::BigInt>,
 {
+    #[inline(always)]
     fn refill_limbs(&mut self) {
-        let x: P::BaseField = sp1_to_ark(self.inner.squeeze());
+        let x: P::BaseField = sp1_to_ark(self.sponge.squeeze());
         let bigint = x.into_bigint();
-        self.last_squeezed.extend_from_slice(&bigint.as_ref()[0..2]);
+
+        self.last_squeezed
+            .extend_from_slice(&bigint.as_ref()[0..CHALLENGE_LENGTH_IN_LIMBS]);
     }
 
-    fn squeeze_limbs(&mut self, num_limbs: usize) -> Vec<u64> {
+    #[inline(always)]
+    pub fn squeeze_limbs(&mut self, num_limbs: usize) -> Vec<u64> {
         while self.last_squeezed.len() < num_limbs {
             self.refill_limbs();
         }
-        let out = self.last_squeezed[..num_limbs].to_vec();
-        self.last_squeezed = self.last_squeezed[num_limbs..].to_vec();
-        out
+
+        take_first_limbs(&mut self.last_squeezed, num_limbs)
     }
 
-    fn squeeze_scalar(&mut self, num_limbs: usize) -> P::ScalarField {
-        let limbs = self.squeeze_limbs(num_limbs);
-        let mut res = <P::ScalarField as PrimeField>::BigInt::from(0u64);
-        for &x in limbs.iter().rev() {
-            res <<= 64;
-            res.add_with_carry(&x.into());
-        }
-        P::ScalarField::from_bigint(res).expect("squeeze_scalar failed")
+    #[inline(always)]
+    pub fn squeeze_field(&mut self) -> P::BaseField {
+        self.last_squeezed.clear();
+        sp1_to_ark(self.sponge.squeeze())
+    }
+
+    #[inline(always)]
+    pub fn squeeze(&mut self, num_limbs: usize) -> P::ScalarField {
+        P::ScalarField::from_bigint(pack(&self.squeeze_limbs(num_limbs)))
+            .expect("squeezed scalar is not a valid scalar field element")
     }
 }
 
-impl<P: SWCurveConfig, const FULL_ROUNDS: usize>
-    FqSponge<P::BaseField, Affine<P>, P::ScalarField, FULL_ROUNDS> for Sp1FqSponge<P>
+impl<P, SC, const FULL_ROUNDS: usize>
+    FqSponge<P::BaseField, Affine<P>, P::ScalarField, FULL_ROUNDS>
+    for Sp1FqSponge<P, SC, FULL_ROUNDS>
 where
+    P: SWCurveConfig,
     P::BaseField: PrimeField + CanonicalSerialize + CanonicalDeserialize,
     P::ScalarField: PrimeField + CanonicalSerialize + CanonicalDeserialize,
     <P::BaseField as PrimeField>::BigInt: Into<<P::ScalarField as PrimeField>::BigInt>,
 {
     fn new(_params: &'static ArithmeticSpongeParams<P::BaseField, FULL_ROUNDS>) -> Self {
         Self {
-            inner: Sp1Sponge::new(),
-            last_squeezed: alloc::vec::Vec::new(),
-            _phantom: core::marker::PhantomData,
+            sponge: Sp1Sponge::new(),
+            last_squeezed: Vec::new(),
+            _phantom: PhantomData,
         }
     }
 
     fn absorb_fq(&mut self, x: &[P::BaseField]) {
         self.last_squeezed.clear();
 
-        std::println!("cycle-tracker-start: sp1_absorb_fq_convert");
-        let inputs: alloc::vec::Vec<Sp1Fp> = x.iter().map(|e| ark_to_sp1(*e)).collect();
-        std::println!("cycle-tracker-end: sp1_absorb_fq_convert");
+        let inputs: Vec<Sp1Fp> = x.iter().map(|e| ark_to_sp1(*e)).collect();
 
-        std::println!("cycle-tracker-start: sp1_absorb_fq_inner");
-        self.inner.absorb(&inputs);
-        std::println!("cycle-tracker-end: sp1_absorb_fq_inner");
+        self.sponge.absorb(&inputs);
     }
 
     fn absorb_g(&mut self, g: &[Affine<P>]) {
         self.last_squeezed.clear();
+
         let zero = P::BaseField::zero();
-        let mut inputs = alloc::vec::Vec::with_capacity(2 * g.len());
+        let mut inputs = Vec::with_capacity(2 * g.len());
+
         for point in g.iter() {
             if point.infinity {
                 inputs.push(ark_to_sp1(zero));
@@ -128,139 +152,120 @@ where
                 inputs.push(ark_to_sp1(point.y));
             }
         }
-        self.inner.absorb(&inputs);
+
+        self.sponge.absorb(&inputs);
     }
 
     fn absorb_fr(&mut self, x: &[P::ScalarField]) {
         self.last_squeezed.clear();
 
         if <P::ScalarField as PrimeField>::MODULUS < <P::BaseField as PrimeField>::MODULUS.into() {
-            let mut inputs = alloc::vec::Vec::with_capacity(x.len());
+            let mut inputs = Vec::with_capacity(x.len());
+
             for scalar in x.iter() {
                 let bits = scalar.into_bigint().to_bits_le();
-                let fe = P::BaseField::from_bigint(
+
+                let fq = P::BaseField::from_bigint(
                     <P::BaseField as PrimeField>::BigInt::from_bits_le(&bits),
                 )
-                .expect("absorb_fr conversion failed");
-                inputs.push(ark_to_sp1(fe));
+                .expect("scalar to base field conversion failed");
+
+                inputs.push(ark_to_sp1(fq));
             }
-            self.inner.absorb(&inputs);
+
+            self.sponge.absorb(&inputs);
         } else {
-            let mut inputs = alloc::vec::Vec::with_capacity(2 * x.len());
+            let mut inputs = Vec::with_capacity(2 * x.len());
+
             for scalar in x.iter() {
                 let bits = scalar.into_bigint().to_bits_le();
+
                 let low_bit = if bits[0] {
                     P::BaseField::one()
                 } else {
                     P::BaseField::zero()
                 };
+
                 let high_bits = P::BaseField::from_bigint(
                     <P::BaseField as PrimeField>::BigInt::from_bits_le(&bits[1..]),
                 )
-                .expect("absorb_fr high_bits failed");
+                .expect("scalar high bits conversion failed");
+
                 inputs.push(ark_to_sp1(high_bits));
                 inputs.push(ark_to_sp1(low_bit));
             }
-            self.inner.absorb(&inputs);
+
+            self.sponge.absorb(&inputs);
         }
     }
 
     fn challenge_fq(&mut self) -> P::BaseField {
-        self.last_squeezed.clear();
-
-        std::println!("cycle-tracker-start: sp1_squeeze_inner");
-        let out = self.inner.squeeze();
-        std::println!("cycle-tracker-end: sp1_squeeze_inner");
-
-        std::println!("cycle-tracker-start: sp1_squeeze_convert");
-        let result = sp1_to_ark(out);
-        std::println!("cycle-tracker-end: sp1_squeeze_convert");
-
-        result
+        self.squeeze_field()
     }
 
     fn challenge(&mut self) -> P::ScalarField {
-        self.squeeze_scalar(CHALLENGE_LENGTH_IN_LIMBS)
+        self.squeeze(CHALLENGE_LENGTH_IN_LIMBS)
     }
 
     fn digest_fq(mut self) -> P::BaseField {
-        self.last_squeezed.clear();
-        sp1_to_ark(self.inner.squeeze())
+        self.squeeze_field()
     }
 
     fn digest(mut self) -> P::ScalarField {
-        let x: <P::BaseField as PrimeField>::BigInt =
-            sp1_to_ark::<P::BaseField>(self.inner.squeeze()).into_bigint();
+        let x: <P::BaseField as PrimeField>::BigInt = self.squeeze_field().into_bigint();
+
         P::ScalarField::from_bigint(x.into()).unwrap_or_else(P::ScalarField::zero)
     }
 }
 
-// ---------------------------------------------------------------------------
-// FrSponge wrapper
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Fr sponge wrapper
+// -----------------------------------------------------------------------------
 
-// pub struct Sp1FrSponge<Fr: PrimeField> {
-//     inner: Sp1Sponge,
-//     last_squeezed: Vec<u64>,
-//     _phantom: core::marker::PhantomData<Fr>,
-// }
+pub struct Sp1FrSponge<Fr: PrimeField, SC = (), const FULL_ROUNDS: usize = 55> {
+    pub sponge: Sp1Sponge,
+    pub last_squeezed: Vec<u64>,
+    _phantom: PhantomData<(Fr, SC)>,
+}
 
-// impl<Fr: PrimeField + CanonicalSerialize + CanonicalDeserialize>
-//     From<&'static ArithmeticSpongeParams<Fr, 55>> for Sp1FrSponge<Fr>
-// {
-//     fn from(_params: &'static ArithmeticSpongeParams<Fr, 55>) -> Self {
-//         Self {
-//             inner: Sp1Sponge::new(),
-//             last_squeezed: Vec::new(),
-//             _phantom: core::marker::PhantomData,
-//         }
-//     }
-// }
+impl<Fr, SC, const FULL_ROUNDS: usize>
+    From<&'static ArithmeticSpongeParams<Fr, FULL_ROUNDS>>
+    for Sp1FrSponge<Fr, SC, FULL_ROUNDS>
+where
+    Fr: PrimeField + CanonicalSerialize + CanonicalDeserialize,
+{
+    fn from(_params: &'static ArithmeticSpongeParams<Fr, FULL_ROUNDS>) -> Self {
+        Self {
+            sponge: Sp1Sponge::new(),
+            last_squeezed: Vec::new(),
+            _phantom: PhantomData,
+        }
+    }
+}
 
-// impl<Fr: PrimeField + CanonicalSerialize + CanonicalDeserialize> crate::sponge::FrSponge<Fr>
-//     for Sp1FrSponge<Fr>
-// {
-//     fn new(_params: &'static ArithmeticSpongeParams<Fr, 55>) -> Self {
-//         Self {
-//             inner: Sp1Sponge::new(),
-//             last_squeezed: Vec::new(),
-//             _phantom: core::marker::PhantomData,
-//         }
-//     }
+impl<Fr, SC, const FULL_ROUNDS: usize> Sp1FrSponge<Fr, SC, FULL_ROUNDS>
+where
+    Fr: PrimeField + CanonicalSerialize + CanonicalDeserialize,
+{
+    #[inline(always)]
+    fn refill_limbs(&mut self) {
+        let x: Fr = sp1_to_ark(self.sponge.squeeze());
+        let bigint = x.into_bigint();
 
-//     fn absorb(&mut self, x: &Fr) {
-//         self.inner.absorb(&[ark_to_sp1(*x)]);
-//     }
+        self.last_squeezed
+            .extend_from_slice(&bigint.as_ref()[0..CHALLENGE_LENGTH_IN_LIMBS]);
+    }
 
-//     fn challenge(&mut self) -> ScalarChallenge<Fr> {
-//         ScalarChallenge(self.squeeze(CHALLENGE_LENGTH_IN_LIMBS))
-//     }
+    #[inline(always)]
+    pub fn squeeze(&mut self, num_limbs: usize) -> Fr {
+        while self.last_squeezed.len() < num_limbs {
+            self.refill_limbs();
+        }
 
-//     fn absorb_evaluations(&mut self, e: &crate::sponge::PointEvaluations<alloc::vec::Vec<Fr>>) {
-//         for x in e.zeta.iter().chain(e.zeta_omega.iter()) {
-//             self.absorb(x);
-//         }
-//     }
-// }
-
-// impl<Fr: PrimeField + CanonicalSerialize + CanonicalDeserialize> Sp1FrSponge<Fr> {
-//     fn refill_limbs(&mut self) {
-//         let x: Fr = sp1_to_ark(self.inner.squeeze());
-//         let bigint = x.into_bigint();
-//         self.last_squeezed.extend_from_slice(&bigint.as_ref()[0..2]);
-//     }
-
-//     fn squeeze(&mut self, num_limbs: usize) -> Fr {
-//         while self.last_squeezed.len() < num_limbs {
-//             self.refill_limbs();
-//         }
-//         let limbs = self.last_squeezed[..num_limbs].to_vec();
-//         self.last_squeezed = self.last_squeezed[num_limbs..].to_vec();
-//         let mut res = <Fr as PrimeField>::BigInt::from(0u64);
-//         for &x in limbs.iter().rev() {
-//             res <<= 64;
-//             res.add_with_carry(&x.into());
-//         }
-//         Fr::from_bigint(res).expect("Fr squeeze failed")
-//     }
-// }
+        Fr::from_bigint(pack::<Fr::BigInt>(&take_first_limbs(
+            &mut self.last_squeezed,
+            num_limbs,
+        )))
+        .expect("squeezed value is not a valid scalar field element")
+    }
+}
