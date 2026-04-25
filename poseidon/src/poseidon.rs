@@ -47,8 +47,7 @@ pub trait Sponge<Input: Field, Digest, const FULL_ROUNDS: usize> {
 
 pub fn sbox<F: Field, SC: SpongeConstants>(mut x: F) -> F {
     if SC::PERM_SBOX == 7 {
-        // This is much faster than using the generic `pow`. Hard-code to get the ~50% speed-up
-        // that it gives to hashing.
+        // This is much faster than using the generic `pow`.
         let mut square = x;
         square.square_in_place();
         x *= square;
@@ -94,7 +93,6 @@ struct Sp1StateCache {
 pub struct ArithmeticSponge<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize> {
     pub sponge_state: SpongeState,
     rate: usize,
-    // TODO(mimoo: an array enforcing the width is better no? or at least an assert somewhere)
     pub state: Vec<F>,
     params: &'static ArithmeticSpongeParams<F, FULL_ROUNDS>,
     pub constants: core::marker::PhantomData<SC>,
@@ -141,12 +139,18 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
 
     #[cfg(target_os = "zkvm")]
     #[inline(always)]
+    fn has_fast_sp1_rate2_path(&self) -> bool {
+        self.sp1_cache.is_some() && FULL_ROUNDS == KIMCHI_FULL_ROUNDS && self.rate == 2
+    }
+
+    #[cfg(target_os = "zkvm")]
+    #[inline(always)]
     fn sync_cache_from_state(&mut self) {
         if let Some(cache) = self.sp1_cache.as_mut() {
             debug_assert!(self.state.len() >= 3);
-            for i in 0..3 {
-                cache.state[i] = zkvm_fast::from_ark(self.state[i]).0;
-            }
+            cache.state[0] = zkvm_fast::from_ark(self.state[0]).0;
+            cache.state[1] = zkvm_fast::from_ark(self.state[1]).0;
+            cache.state[2] = zkvm_fast::from_ark(self.state[2]).0;
             self.sp1_state_stale = false;
         }
     }
@@ -160,9 +164,9 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
 
         if let Some(cache) = self.sp1_cache.as_ref() {
             debug_assert!(self.state.len() >= 3);
-            for i in 0..3 {
-                self.state[i] = zkvm_fast::to_ark(zkvm_fast::Sp1Fp(cache.state[i]));
-            }
+            self.state[0] = zkvm_fast::to_ark(zkvm_fast::Sp1Fp(cache.state[0]));
+            self.state[1] = zkvm_fast::to_ark(zkvm_fast::Sp1Fp(cache.state[1]));
+            self.state[2] = zkvm_fast::to_ark(zkvm_fast::Sp1Fp(cache.state[2]));
             self.sp1_state_stale = false;
         }
     }
@@ -176,6 +180,83 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
             }
         }
         self.state[idx]
+    }
+
+    #[cfg(target_os = "zkvm")]
+    #[inline(always)]
+    fn cache_add_to_slot(&mut self, idx: usize, x: F) {
+        let cache = self.sp1_cache.as_mut().unwrap();
+        let x_limbs = zkvm_fast::from_ark(x);
+        let cur = zkvm_fast::Sp1Fp(cache.state[idx]);
+        cache.state[idx] = zkvm_fast::add(cur, x_limbs, cache.modulus).0;
+        self.sp1_state_stale = true;
+    }
+
+    #[cfg(target_os = "zkvm")]
+    #[inline(always)]
+    fn absorb_fast_sp1_rate2(&mut self, inputs: &[F]) -> bool {
+        if !self.has_fast_sp1_rate2_path() {
+            return false;
+        }
+
+        for x in inputs.iter().copied() {
+            match self.sponge_state {
+                SpongeState::Absorbed(0) => {
+                    self.cache_add_to_slot(0, x);
+                    self.sponge_state = SpongeState::Absorbed(1);
+                }
+                SpongeState::Absorbed(1) => {
+                    self.cache_add_to_slot(1, x);
+                    self.sponge_state = SpongeState::Absorbed(2);
+                }
+                SpongeState::Absorbed(2) => {
+                    self.poseidon_block_cipher();
+                    self.cache_add_to_slot(0, x);
+                    self.sponge_state = SpongeState::Absorbed(1);
+                }
+                SpongeState::Squeezed(_) => {
+                    self.cache_add_to_slot(0, x);
+                    self.sponge_state = SpongeState::Absorbed(1);
+                }
+                SpongeState::Absorbed(_) => {
+                    self.ensure_state_synced_from_cache();
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    #[cfg(target_os = "zkvm")]
+    #[inline(always)]
+    fn squeeze_fast_sp1_rate2(&mut self) -> Option<F> {
+        if !self.has_fast_sp1_rate2_path() {
+            return None;
+        }
+
+        let out = match self.sponge_state {
+            SpongeState::Squeezed(1) => {
+                self.sponge_state = SpongeState::Squeezed(2);
+                self.read_state_slot(1)
+            }
+            SpongeState::Squeezed(2) => {
+                self.poseidon_block_cipher();
+                self.sponge_state = SpongeState::Squeezed(1);
+                self.read_state_slot(0)
+            }
+            SpongeState::Absorbed(_) => {
+                self.poseidon_block_cipher();
+                self.sponge_state = SpongeState::Squeezed(1);
+                self.read_state_slot(0)
+            }
+            SpongeState::Squeezed(_) => {
+                self.ensure_state_synced_from_cache();
+                return None;
+            }
+        };
+
+        Some(out)
     }
 
     #[inline(always)]
@@ -211,7 +292,7 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
     pub fn poseidon_block_cipher(&mut self) {
         #[cfg(target_os = "zkvm")]
         if let Some(cache) = self.sp1_cache.as_mut() {
-            zkvm_fast::permute_state::<F, SC, FULL_ROUNDS>(
+            zkvm_fast::permute_state::<SC, FULL_ROUNDS>(
                 &mut cache.state,
                 cache.field_kind,
                 cache.modulus,
@@ -254,6 +335,11 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize> Sponge<F, F, 
     }
 
     fn absorb(&mut self, x: &[F]) {
+        #[cfg(target_os = "zkvm")]
+        if self.absorb_fast_sp1_rate2(x) {
+            return;
+        }
+
         for x in x.iter().copied() {
             match self.sponge_state {
                 SpongeState::Absorbed(n) => {
@@ -275,42 +361,26 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize> Sponge<F, F, 
     }
 
     fn squeeze(&mut self) -> F {
+        #[cfg(target_os = "zkvm")]
+        if let Some(out) = self.squeeze_fast_sp1_rate2() {
+            return out;
+        }
+
         match self.sponge_state {
             SpongeState::Squeezed(n) => {
                 if n == self.rate {
                     self.poseidon_block_cipher();
                     self.sponge_state = SpongeState::Squeezed(1);
-                    #[cfg(target_os = "zkvm")]
-                    {
-                        return self.read_state_slot(0);
-                    }
-                    #[cfg(not(target_os = "zkvm"))]
-                    {
-                        return self.state[0];
-                    }
+                    self.state[0]
                 } else {
                     self.sponge_state = SpongeState::Squeezed(n + 1);
-                    #[cfg(target_os = "zkvm")]
-                    {
-                        return self.read_state_slot(n);
-                    }
-                    #[cfg(not(target_os = "zkvm"))]
-                    {
-                        return self.state[n];
-                    }
+                    self.state[n]
                 }
             }
             SpongeState::Absorbed(_) => {
                 self.poseidon_block_cipher();
                 self.sponge_state = SpongeState::Squeezed(1);
-                #[cfg(target_os = "zkvm")]
-                {
-                    return self.read_state_slot(0);
-                }
-                #[cfg(not(target_os = "zkvm"))]
-                {
-                    return self.state[0];
-                }
+                self.state[0]
             }
         }
     }
@@ -333,7 +403,6 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize> Sponge<F, F, 
 mod zkvm_fast {
     use super::*;
     use crate::pasta::{fp_sp1, fq_sp1};
-    use ark_ff::PrimeField;
 
     type Sp1Limbs = [u64; 4];
 
@@ -343,6 +412,7 @@ mod zkvm_fast {
 
     #[inline(always)]
     pub(crate) fn from_ark<F: PrimeField>(x: F) -> Sp1Fp {
+        // This benefits directly from the patched zkVM `into_bigint`.
         let bigint = x.into_bigint();
         let limbs = bigint.as_ref();
         debug_assert!(limbs.len() == 4);
@@ -351,6 +421,9 @@ mod zkvm_fast {
 
     #[inline(always)]
     pub(crate) fn to_ark<F: PrimeField>(x: Sp1Fp) -> F {
+        // Keeping this generic and safe.
+        // If you later decide to specialize only for Pasta concrete fields,
+        // this can be replaced by a direct `from_bigint` path.
         let bytes: [u8; 32] = bytemuck::cast(x.0);
         F::from_le_bytes_mod_order(&bytes)
     }
@@ -418,7 +491,6 @@ mod zkvm_fast {
         state: &mut [Sp1Fp; 3],
         modulus: Sp1Limbs,
     ) {
-        // Fast path for the special MDS shape.
         if !SC::PERM_FULL_MDS {
             let s0 = state[0];
             let s1 = state[1];
@@ -528,7 +600,7 @@ mod zkvm_fast {
     }
 
     #[inline(always)]
-    fn permute_with_constants<F: PrimeField + Copy, SC: SpongeConstants>(
+    fn permute_with_constants<SC: SpongeConstants>(
         state: &mut [[u64; 4]; 3],
         mds: &[[Sp1Limbs; 3]; 3],
         rc: &[[Sp1Limbs; 3]; KIMCHI_FULL_ROUNDS],
@@ -559,7 +631,7 @@ mod zkvm_fast {
         state[2] = s[2].0;
     }
 
-    pub(crate) fn permute_state<F: PrimeField + Copy, SC: SpongeConstants, const FULL_ROUNDS: usize>(
+    pub(crate) fn permute_state<SC: SpongeConstants, const FULL_ROUNDS: usize>(
         state: &mut [[u64; 4]; 3],
         field_kind: PastaFieldKind,
         modulus: Sp1Limbs,
@@ -570,10 +642,10 @@ mod zkvm_fast {
 
         match field_kind {
             PastaFieldKind::PallasFp => {
-                permute_with_constants::<F, SC>(state, &fp_sp1::MDS, &fp_sp1::ROUND_CONSTANTS, modulus);
+                permute_with_constants::<SC>(state, &fp_sp1::MDS, &fp_sp1::ROUND_CONSTANTS, modulus);
             }
             PastaFieldKind::VestaFq => {
-                permute_with_constants::<F, SC>(state, &fq_sp1::MDS, &fq_sp1::ROUND_CONSTANTS, modulus);
+                permute_with_constants::<SC>(state, &fq_sp1::MDS, &fq_sp1::ROUND_CONSTANTS, modulus);
             }
         }
     }
