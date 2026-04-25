@@ -1751,7 +1751,6 @@ Same as the prover index, we have a number of pre-computations as part of the ve
 ```rs
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)] 
 pub struct LookupVerifierIndex<G: CommitmentCurve> {
     pub joint_lookup_used: bool,
     #[serde(bound = "PolyComm<G>: Serialize + DeserializeOwned")]
@@ -1774,7 +1773,6 @@ pub struct LookupVerifierIndex<G: CommitmentCurve> {
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)] 
 pub struct VerifierIndex<const FULL_ROUNDS: usize, G: KimchiCurve<FULL_ROUNDS>, Srs> {
     /// evaluation domain
     #[serde_as(as = "o1_utils::serialization::SerdeAs")]
