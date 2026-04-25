@@ -630,10 +630,18 @@ mod zkvm_fast {
 
     #[inline(always)]
     fn pow7(x: Sp1Fp, modulus: Sp1Limbs) -> Sp1Fp {
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_start!("zkvm_pow7");
+
         let x2 = mul(x, x, modulus);
         let x4 = mul(x2, x2, modulus);
         let x6 = mul(x4, x2, modulus);
-        mul(x6, x, modulus)
+        let out = mul(x6, x, modulus);
+
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_end!("zkvm_pow7");
+
+        out
     }
 
     #[inline(always)]
@@ -642,6 +650,9 @@ mod zkvm_fast {
         state: &mut [Sp1Fp; 3],
         modulus: Sp1Limbs,
     ) {
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_start!("zkvm_apply_mds");
+
         if !SC::PERM_FULL_MDS {
             let s0 = state[0];
             let s1 = state[1];
@@ -688,6 +699,9 @@ mod zkvm_fast {
             mul(Sp1Fp(mds[2][2]), tmp[2], modulus),
             modulus,
         );
+
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_end!("zkvm_apply_mds");
     }
 
     #[inline(always)]
