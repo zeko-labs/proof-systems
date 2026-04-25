@@ -10,6 +10,20 @@ use crate::{
 use ark_ff::Field;
 const MDS_WIDTH: usize = 3;
 
+#[cfg(target_os = "zkvm")]
+macro_rules! zk_cycle_start {
+    ($name:expr) => {
+        std::println!(concat!("cycle-tracker-start: ", $name));
+    };
+}
+
+#[cfg(target_os = "zkvm")]
+macro_rules! zk_cycle_end {
+    ($name:expr) => {
+        std::println!(concat!("cycle-tracker-end: ", $name));
+    };
+}
+
 fn apply_mds_matrix<F: Field, SC: SpongeConstants>(
     mds: [[F; MDS_WIDTH]; MDS_WIDTH],
     state: &mut [F],

@@ -11,6 +11,20 @@ use ark_ff::{Field, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 #[cfg(target_os = "zkvm")]
+macro_rules! zk_cycle_start {
+    ($name:expr) => {
+        std::println!(concat!("cycle-tracker-start: ", $name));
+    };
+}
+
+#[cfg(target_os = "zkvm")]
+macro_rules! zk_cycle_end {
+    ($name:expr) => {
+        std::println!(concat!("cycle-tracker-end: ", $name));
+    };
+}
+
+#[cfg(target_os = "zkvm")]
 const KIMCHI_FULL_ROUNDS: usize = 55;
 
 #[cfg(target_os = "zkvm")]
@@ -338,26 +352,49 @@ impl<
 
     pub fn poseidon_block_cipher(&mut self) {
         #[cfg(target_os = "zkvm")]
+        zk_cycle_start!("poseidon_block_cipher_total");
+
+        #[cfg(target_os = "zkvm")]
         if self.has_fast_kimchi_path() {
+            zk_cycle_start!("poseidon_fast_kimchi_permute");
             self.poseidon_block_cipher_fast();
+            zk_cycle_end!("poseidon_fast_kimchi_permute");
+            zk_cycle_end!("poseidon_block_cipher_total");
             return;
         }
 
         #[cfg(target_os = "zkvm")]
         if let Some(cache) = self.sp1_cache.as_mut() {
+            zk_cycle_start!("poseidon_sp1_cache_permute");
+
             zkvm_fast::permute_state::<SC, FULL_ROUNDS>(
                 &mut cache.state,
                 cache.field_kind,
                 cache.modulus,
             );
+
             self.sp1_state_stale = true;
+
+            zk_cycle_end!("poseidon_sp1_cache_permute");
+            zk_cycle_end!("poseidon_block_cipher_total");
             return;
         }
+
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_start!("poseidon_generic_permute");
 
         poseidon_block_cipher::<F, SC, FULL_ROUNDS>(self.params, &mut self.state);
 
         #[cfg(target_os = "zkvm")]
-        self.sync_cache_from_state();
+        zk_cycle_end!("poseidon_generic_permute");
+
+        #[cfg(target_os = "zkvm")]
+        {
+            zk_cycle_start!("poseidon_sync_cache_from_state");
+            self.sync_cache_from_state();
+            zk_cycle_end!("poseidon_sync_cache_from_state");
+            zk_cycle_end!("poseidon_block_cipher_total");
+        }
     }
 }
 
@@ -399,15 +436,34 @@ impl<
 
     fn absorb(&mut self, x: &[F]) {
         #[cfg(target_os = "zkvm")]
-        if self.absorb_fast_kimchi(x) {
-            return;
+        zk_cycle_start!("sponge_absorb_total");
+
+        #[cfg(target_os = "zkvm")]
+        {
+            zk_cycle_start!("sponge_absorb_fast_kimchi");
+            if self.absorb_fast_kimchi(x) {
+                zk_cycle_end!("sponge_absorb_fast_kimchi");
+                zk_cycle_end!("sponge_absorb_total");
+                return;
+            }
+            zk_cycle_end!("sponge_absorb_fast_kimchi");
         }
 
         for x in x.iter().copied() {
+            #[cfg(target_os = "zkvm")]
+            zk_cycle_start!("sponge_absorb_one");
+
             match self.sponge_state {
                 SpongeState::Absorbed(n) => {
                     if n == self.rate {
+                        #[cfg(target_os = "zkvm")]
+                        zk_cycle_start!("sponge_absorb_permute");
+
                         self.poseidon_block_cipher();
+
+                        #[cfg(target_os = "zkvm")]
+                        zk_cycle_end!("sponge_absorb_permute");
+
                         self.sponge_state = SpongeState::Absorbed(1);
                         self.add_to_state_slot(0, x);
                     } else {
@@ -420,19 +476,41 @@ impl<
                     self.sponge_state = SpongeState::Absorbed(1);
                 }
             }
+
+            #[cfg(target_os = "zkvm")]
+            zk_cycle_end!("sponge_absorb_one");
         }
+
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_end!("sponge_absorb_total");
     }
 
     fn squeeze(&mut self) -> F {
         #[cfg(target_os = "zkvm")]
-        if let Some(out) = self.squeeze_fast_kimchi() {
-            return out;
+        zk_cycle_start!("sponge_squeeze_total");
+
+        #[cfg(target_os = "zkvm")]
+        {
+            zk_cycle_start!("sponge_squeeze_fast_kimchi");
+            if let Some(out) = self.squeeze_fast_kimchi() {
+                zk_cycle_end!("sponge_squeeze_fast_kimchi");
+                zk_cycle_end!("sponge_squeeze_total");
+                return out;
+            }
+            zk_cycle_end!("sponge_squeeze_fast_kimchi");
         }
 
-        match self.sponge_state {
+        let out = match self.sponge_state {
             SpongeState::Squeezed(n) => {
                 if n == self.rate {
+                    #[cfg(target_os = "zkvm")]
+                    zk_cycle_start!("sponge_squeeze_permute");
+
                     self.poseidon_block_cipher();
+
+                    #[cfg(target_os = "zkvm")]
+                    zk_cycle_end!("sponge_squeeze_permute");
+
                     self.sponge_state = SpongeState::Squeezed(1);
                     self.state[0]
                 } else {
@@ -441,11 +519,23 @@ impl<
                 }
             }
             SpongeState::Absorbed(_) => {
+                #[cfg(target_os = "zkvm")]
+                zk_cycle_start!("sponge_squeeze_permute");
+
                 self.poseidon_block_cipher();
+
+                #[cfg(target_os = "zkvm")]
+                zk_cycle_end!("sponge_squeeze_permute");
+
                 self.sponge_state = SpongeState::Squeezed(1);
                 self.state[0]
             }
-        }
+        };
+
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_end!("sponge_squeeze_total");
+
+        out
     }
 
     fn reset(&mut self) {
@@ -540,10 +630,18 @@ mod zkvm_fast {
 
     #[inline(always)]
     fn pow7(x: Sp1Fp, modulus: Sp1Limbs) -> Sp1Fp {
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_start!("zkvm_pow7");
+
         let x2 = mul(x, x, modulus);
         let x4 = mul(x2, x2, modulus);
         let x6 = mul(x4, x2, modulus);
-        mul(x6, x, modulus)
+        let out = mul(x6, x, modulus);
+
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_end!("zkvm_pow7");
+
+        out
     }
 
     #[inline(always)]
@@ -552,6 +650,9 @@ mod zkvm_fast {
         state: &mut [Sp1Fp; 3],
         modulus: Sp1Limbs,
     ) {
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_start!("zkvm_apply_mds");
+
         if !SC::PERM_FULL_MDS {
             let s0 = state[0];
             let s1 = state[1];
@@ -560,6 +661,10 @@ mod zkvm_fast {
             state[0] = add(s0, s2, modulus);
             state[1] = add(s0, s1, modulus);
             state[2] = add(s1, s2, modulus);
+
+            #[cfg(target_os = "zkvm")]
+            zk_cycle_end!("zkvm_apply_mds");
+
             return;
         }
 
@@ -594,6 +699,9 @@ mod zkvm_fast {
             mul(Sp1Fp(mds[2][2]), tmp[2], modulus),
             modulus,
         );
+
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_end!("zkvm_apply_mds");
     }
 
     #[inline(always)]
@@ -697,27 +805,47 @@ mod zkvm_fast {
         field_kind: PastaFieldKind,
         modulus: Sp1Limbs,
     ) {
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_start!("zkvm_permute_state_total");
+
         if FULL_ROUNDS != KIMCHI_FULL_ROUNDS {
+            #[cfg(target_os = "zkvm")]
+            zk_cycle_end!("zkvm_permute_state_total");
             return;
         }
 
         match field_kind {
             PastaFieldKind::PallasFp => {
+                #[cfg(target_os = "zkvm")]
+                zk_cycle_start!("zkvm_permute_pallas");
+
                 permute_with_constants::<SC>(
                     state,
                     &fp_sp1::MDS,
                     &fp_sp1::ROUND_CONSTANTS,
                     modulus,
                 );
+
+                #[cfg(target_os = "zkvm")]
+                zk_cycle_end!("zkvm_permute_pallas");
             }
             PastaFieldKind::VestaFq => {
+                #[cfg(target_os = "zkvm")]
+                zk_cycle_start!("zkvm_permute_vesta");
+
                 permute_with_constants::<SC>(
                     state,
                     &fq_sp1::MDS,
                     &fq_sp1::ROUND_CONSTANTS,
                     modulus,
                 );
+
+                #[cfg(target_os = "zkvm")]
+                zk_cycle_end!("zkvm_permute_vesta");
             }
         }
+
+        #[cfg(target_os = "zkvm")]
+        zk_cycle_end!("zkvm_permute_state_total");
     }
 }
