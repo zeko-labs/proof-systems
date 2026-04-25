@@ -45,6 +45,12 @@ pub struct Sp1FqSponge<P: SWCurveConfig> {
     _phantom: core::marker::PhantomData<P>,
 }
 
+pub struct Sp1FrSponge<Fr: PrimeField, SC = (), const FULL_ROUNDS: usize = 55> {
+    inner: Sp1Sponge,
+    last_squeezed: alloc::vec::Vec<u64>,
+    _phantom: core::marker::PhantomData<(Fr, SC)>,
+}
+
 impl<P: SWCurveConfig> Sp1FqSponge<P>
 where
     P::BaseField: PrimeField + CanonicalSerialize + CanonicalDeserialize,
