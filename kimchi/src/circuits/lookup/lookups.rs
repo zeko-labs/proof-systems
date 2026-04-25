@@ -47,6 +47,7 @@ fn max_lookups_per_row(kinds: LookupPatterns) -> usize {
     derive(ocaml::IntoValue, ocaml::FromValue, ocaml_gen::Struct)
 )]
 #[cfg_attr(feature = "wasm_types", wasm_bindgen::prelude::wasm_bindgen)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct LookupPatterns {
     pub xor: bool,
     pub lookup: bool,
@@ -139,6 +140,7 @@ impl LookupPatterns {
     derive(ocaml::IntoValue, ocaml::FromValue, ocaml_gen::Struct)
 )]
 #[cfg_attr(feature = "wasm_types", wasm_bindgen::prelude::wasm_bindgen)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct LookupFeatures {
     /// A single lookup constraint is a vector of lookup constraints to be applied at a row.
     pub patterns: LookupPatterns,
@@ -165,6 +167,7 @@ impl LookupFeatures {
 /// Describes the desired lookup configuration.
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 #[cfg_attr(feature = "wasm_types", wasm_bindgen::prelude::wasm_bindgen)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct LookupInfo {
     /// The maximum length of an element of `kinds`. This can be computed from `kinds`.
     pub max_per_row: usize,

@@ -34,6 +34,7 @@ use std::{
 //~spec:startcode
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)] 
 pub struct LookupVerifierIndex<G: CommitmentCurve> {
     pub joint_lookup_used: bool,
     #[serde(bound = "PolyComm<G>: Serialize + DeserializeOwned")]

@@ -94,14 +94,14 @@ impl<F: PrimeField> ScalarChallenge<F> {
 #[derive(Clone)]
 pub struct DefaultFqSponge<P: SWCurveConfig, SC: SpongeConstants, const FULL_ROUNDS: usize>
 where
-    P::BaseField: PrimeField + CanonicalSerialize + CanonicalDeserialize,
+    P::BaseField: CanonicalSerialize + CanonicalDeserialize,
 {
     pub sponge: ArithmeticSponge<P::BaseField, SC, FULL_ROUNDS>,
     pub last_squeezed: Vec<u64>,
 }
 
 pub struct DefaultFrSponge<
-    Fr: PrimeField + CanonicalSerialize + CanonicalDeserialize,
+    Fr: Field + CanonicalSerialize + CanonicalDeserialize,
     SC: SpongeConstants,
     const FULL_ROUNDS: usize,
 > {
