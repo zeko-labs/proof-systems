@@ -88,4 +88,24 @@ impl Fp {
     pub fn to_u256(self) -> U256 {
         self.0
     }
+
+    #[inline(always)]
+    pub fn from_le_limbs(limbs: [u64; 4]) -> Self {
+        Fp(U256::from_le_bytes(bytemuck::cast(limbs)))
+    }
+
+    #[inline(always)]
+    pub fn to_le_limbs(self) -> [u64; 4] {
+        bytemuck::cast(self.0.to_le_bytes())
+    }
+
+    #[inline(always)]
+    pub fn to_le_bytes(self) -> [u8; 32] {
+        self.0.to_le_bytes()
+    }
+
+    #[inline(always)]
+    pub fn from_le_bytes(bytes: [u8; 32]) -> Self {
+        Fp(U256::from_le_bytes(bytes))
+    }
 }

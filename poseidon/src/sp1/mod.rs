@@ -5,6 +5,7 @@ mod params;
 mod poseidon;
 
 use alloc::vec::Vec;
+use crypto_bigint::U256;
 use fp::Fp as Sp1Fp;
 use poseidon::Sponge as Sp1Sponge;
 
@@ -22,16 +23,17 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 // ---------------------------------------------------------------------------
 
 #[inline(always)]
-fn ark_to_sp1<F: PrimeField + CanonicalSerialize>(x: F) -> Sp1Fp {
-    let mut buf = [0u8; 32];
-    x.serialize_uncompressed(&mut buf[..]).unwrap();
-    Sp1Fp::from_be_bytes(buf)
+fn ark_to_sp1<F: ark_ff::PrimeField>(x: F) -> Sp1Fp {
+    let limbs: [u64; 4] = unsafe { *(x.into_bigint().as_ref().as_ptr() as *const [u64; 4]) };
+    Sp1Fp::from_le_limbs(limbs)
 }
 
 #[inline(always)]
-fn sp1_to_ark<F: PrimeField + CanonicalDeserialize>(x: Sp1Fp) -> F {
-    let buf = x.to_be_bytes();
-    F::deserialize_uncompressed(&buf[..]).unwrap()
+fn sp1_to_ark<F: ark_ff::PrimeField>(x: Sp1Fp) -> F {
+    let limbs = x.to_le_limbs();
+    let mut bi = F::BigInt::default();
+    bi.as_mut().copy_from_slice(&limbs);
+    F::from_bigint(bi).unwrap()
 }
 
 // ---------------------------------------------------------------------------
