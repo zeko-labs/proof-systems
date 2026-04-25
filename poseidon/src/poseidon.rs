@@ -7,7 +7,7 @@ use crate::{
     permutation::{full_round, poseidon_block_cipher},
 };
 use alloc::{vec, vec::Vec};
-use ark_ff::{Field, PrimeField};
+use ark_ff::{BigInt, Field, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 #[cfg(target_os = "zkvm")]
@@ -104,7 +104,7 @@ pub struct ArithmeticSponge<F: Field, SC: SpongeConstants, const FULL_ROUNDS: us
 
 #[cfg(target_os = "zkvm")]
 #[inline(always)]
-fn detect_pasta_field<F: PrimeField>() -> Option<(PastaFieldKind, [u64; 4])> {
+fn detect_pasta_field<F: PrimeField<BigInt = BigInt<4>>>() -> Option<(PastaFieldKind, [u64; 4])> {
     let ch = F::characteristic();
     let modulus = [
         ch.get(0).copied().unwrap_or(0),
@@ -120,7 +120,7 @@ fn detect_pasta_field<F: PrimeField>() -> Option<(PastaFieldKind, [u64; 4])> {
     }
 }
 
-impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
+impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: usize>
     ArithmeticSponge<F, SC, FULL_ROUNDS>
 {
     #[cfg(target_os = "zkvm")]
@@ -164,9 +164,9 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
 
         if let Some(cache) = self.sp1_cache.as_ref() {
             debug_assert!(self.state.len() >= 3);
-            self.state[0] = zkvm_fast::to_ark(zkvm_fast::Sp1Fp(cache.state[0]));
-            self.state[1] = zkvm_fast::to_ark(zkvm_fast::Sp1Fp(cache.state[1]));
-            self.state[2] = zkvm_fast::to_ark(zkvm_fast::Sp1Fp(cache.state[2]));
+            self.state[0] = zkvm_fast::to_ark::<F>(zkvm_fast::Sp1Fp(cache.state[0]));
+            self.state[1] = zkvm_fast::to_ark::<F>(zkvm_fast::Sp1Fp(cache.state[1]));
+            self.state[2] = zkvm_fast::to_ark::<F>(zkvm_fast::Sp1Fp(cache.state[2]));
             self.sp1_state_stale = false;
         }
     }
@@ -176,7 +176,7 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
     fn read_state_slot(&self, idx: usize) -> F {
         if self.sp1_state_stale {
             if let Some(cache) = self.sp1_cache.as_ref() {
-                return zkvm_fast::to_ark(zkvm_fast::Sp1Fp(cache.state[idx]));
+                return zkvm_fast::to_ark::<F>(zkvm_fast::Sp1Fp(cache.state[idx]));
             }
         }
         self.state[idx]
@@ -308,8 +308,8 @@ impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize>
     }
 }
 
-impl<F: PrimeField, SC: SpongeConstants, const FULL_ROUNDS: usize> Sponge<F, F, FULL_ROUNDS>
-    for ArithmeticSponge<F, SC, FULL_ROUNDS>
+impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: usize>
+    Sponge<F, F, FULL_ROUNDS> for ArithmeticSponge<F, SC, FULL_ROUNDS>
 {
     fn new(params: &'static ArithmeticSpongeParams<F, FULL_ROUNDS>) -> Self {
         let capacity = SC::SPONGE_CAPACITY;
@@ -411,21 +411,15 @@ mod zkvm_fast {
     pub(crate) struct Sp1Fp(pub(crate) Sp1Limbs);
 
     #[inline(always)]
-    pub(crate) fn from_ark<F: PrimeField>(x: F) -> Sp1Fp {
-        // This benefits directly from the patched zkVM `into_bigint`.
-        let bigint = x.into_bigint();
-        let limbs = bigint.as_ref();
-        debug_assert!(limbs.len() == 4);
-        Sp1Fp([limbs[0], limbs[1], limbs[2], limbs[3]])
+    pub(crate) fn from_ark<F: PrimeField<BigInt = BigInt<4>>>(x: F) -> Sp1Fp {
+        // Uses the patched zkVM `into_bigint` directly.
+        Sp1Fp(x.into_bigint().0)
     }
 
     #[inline(always)]
-    pub(crate) fn to_ark<F: PrimeField>(x: Sp1Fp) -> F {
-        // Keeping this generic and safe.
-        // If you later decide to specialize only for Pasta concrete fields,
-        // this can be replaced by a direct `from_bigint` path.
-        let bytes: [u8; 32] = bytemuck::cast(x.0);
-        F::from_le_bytes_mod_order(&bytes)
+    pub(crate) fn to_ark<F: PrimeField<BigInt = BigInt<4>>>(x: Sp1Fp) -> F {
+        // Uses the patched zkVM `from_bigint` directly.
+        F::from_bigint(BigInt::<4>(x.0)).unwrap()
     }
 
     #[inline(always)]
