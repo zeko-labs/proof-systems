@@ -181,10 +181,9 @@ where
 {
     #[inline(always)]
     fn refill_limbs(&mut self) {
-        let x = self.sponge.squeeze();
-        let limbs: [u64; 4] = unsafe { *(x.into_bigint().as_ref().as_ptr() as *const [u64; 4]) };
+        let x = self.sponge.squeeze().into_bigint();
         self.last_squeezed
-            .extend_from_slice(&limbs[0..HIGH_ENTROPY_LIMBS]);
+            .extend_from_slice(&x.as_ref()[0..HIGH_ENTROPY_LIMBS]);
     }
 
     pub fn squeeze_limbs(&mut self, num_limbs: usize) -> Vec<u64> {
@@ -223,14 +222,21 @@ where
 
     fn absorb_g(&mut self, g: &[Affine<P>]) {
         self.last_squeezed.clear();
-        let zero = P::BaseField::zero();
+
+        let mut buf = Vec::with_capacity(2 * g.len());
         for point in g.iter() {
             if point.infinity {
-                self.sponge.absorb(&[zero, zero]);
+                // Absorb a fake point (0, 0).
+                let zero = P::BaseField::zero();
+                buf.push(zero);
+                buf.push(zero);
             } else {
-                self.sponge.absorb(&[point.x, point.y]);
+                buf.push(point.x);
+                buf.push(point.y);
             }
         }
+
+        self.sponge.absorb(&buf);
     }
 
     fn absorb_fq(&mut self, x: &[P::BaseField]) {
@@ -242,15 +248,21 @@ where
         self.last_squeezed.clear();
 
         if <P::ScalarField as PrimeField>::MODULUS < <P::BaseField as PrimeField>::MODULUS.into() {
+            let mut buf = Vec::with_capacity(x.len());
+
             for scalar in x.iter() {
                 let bits = scalar.into_bigint().to_bits_le();
                 let fe = P::BaseField::from_bigint(
                     <P::BaseField as PrimeField>::BigInt::from_bits_le(&bits),
                 )
                 .expect("padding code has a bug");
-                self.sponge.absorb(&[fe]);
+                buf.push(fe);
             }
+
+            self.sponge.absorb(&buf);
         } else {
+            let mut buf = Vec::with_capacity(2 * x.len());
+
             for scalar in x.iter() {
                 let bits = scalar.into_bigint().to_bits_le();
 
@@ -265,8 +277,11 @@ where
                 )
                 .expect("padding code has a bug");
 
-                self.sponge.absorb(&[high_bits, low_bit]);
+                buf.push(high_bits);
+                buf.push(low_bit);
             }
+
+            self.sponge.absorb(&buf);
         }
     }
 
