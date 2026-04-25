@@ -7,7 +7,7 @@ use crate::{
     permutation::{full_round, poseidon_block_cipher},
 };
 use alloc::{vec, vec::Vec};
-use ark_ff::{BigInt, Field, PrimeField};
+use ark_ff::{Field, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 #[cfg(target_os = "zkvm")]
@@ -29,19 +29,19 @@ const VESTA_BASE_MODULUS: [u64; 4] = [
     0x4000000000000000,
 ];
 
-/// Cryptographic sponge interface - for hashing an arbitrary amount of
-/// data into one or more field elements
+/// Cryptographic sponge interface for hashing an arbitrary amount of
+/// data into one or more field elements.
 pub trait Sponge<Input: Field, Digest, const FULL_ROUNDS: usize> {
-    /// Create a new cryptographic sponge using arithmetic sponge `params`
+    /// Create a new cryptographic sponge using arithmetic sponge params.
     fn new(params: &'static ArithmeticSpongeParams<Input, FULL_ROUNDS>) -> Self;
 
-    /// Absorb an array of field elements `x`
+    /// Absorb an array of field elements.
     fn absorb(&mut self, x: &[Input]);
 
-    /// Squeeze an output from the sponge
+    /// Squeeze an output from the sponge.
     fn squeeze(&mut self) -> Digest;
 
-    /// Reset the sponge back to its initial state (as if it were just created)
+    /// Reset the sponge back to its initial state.
     fn reset(&mut self);
 }
 
@@ -100,7 +100,11 @@ enum FastKimchiPhase {
 }
 
 #[derive(Clone)]
-pub struct ArithmeticSponge<F: Field, SC: SpongeConstants, const FULL_ROUNDS: usize> {
+pub struct ArithmeticSponge<
+    F: Field + CanonicalSerialize + CanonicalDeserialize,
+    SC: SpongeConstants,
+    const FULL_ROUNDS: usize,
+> {
     pub sponge_state: SpongeState,
     rate: usize,
     pub state: Vec<F>,
@@ -116,7 +120,7 @@ pub struct ArithmeticSponge<F: Field, SC: SpongeConstants, const FULL_ROUNDS: us
 
 #[cfg(target_os = "zkvm")]
 #[inline(always)]
-fn detect_pasta_field<F: PrimeField<BigInt = BigInt<4>>>() -> Option<(PastaFieldKind, [u64; 4])> {
+fn detect_pasta_field<F: PrimeField>() -> Option<(PastaFieldKind, [u64; 4])> {
     let ch = F::characteristic();
     let modulus = [
         ch.get(0).copied().unwrap_or(0),
@@ -132,8 +136,11 @@ fn detect_pasta_field<F: PrimeField<BigInt = BigInt<4>>>() -> Option<(PastaField
     }
 }
 
-impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: usize>
-    ArithmeticSponge<F, SC, FULL_ROUNDS>
+impl<
+        F: PrimeField + CanonicalSerialize + CanonicalDeserialize,
+        SC: SpongeConstants,
+        const FULL_ROUNDS: usize,
+    > ArithmeticSponge<F, SC, FULL_ROUNDS>
 {
     #[cfg(target_os = "zkvm")]
     #[inline(always)]
@@ -354,8 +361,11 @@ impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: 
     }
 }
 
-impl<F: PrimeField<BigInt = BigInt<4>>, SC: SpongeConstants, const FULL_ROUNDS: usize>
-    Sponge<F, F, FULL_ROUNDS> for ArithmeticSponge<F, SC, FULL_ROUNDS>
+impl<
+        F: PrimeField + CanonicalSerialize + CanonicalDeserialize,
+        SC: SpongeConstants,
+        const FULL_ROUNDS: usize,
+    > Sponge<F, F, FULL_ROUNDS> for ArithmeticSponge<F, SC, FULL_ROUNDS>
 {
     fn new(params: &'static ArithmeticSpongeParams<F, FULL_ROUNDS>) -> Self {
         let capacity = SC::SPONGE_CAPACITY;
@@ -467,13 +477,16 @@ mod zkvm_fast {
     pub(crate) struct Sp1Fp(pub(crate) Sp1Limbs);
 
     #[inline(always)]
-    pub(crate) fn from_ark<F: PrimeField<BigInt = BigInt<4>>>(x: F) -> Sp1Fp {
-        Sp1Fp(x.into_bigint().0)
+    pub(crate) fn from_ark<F: PrimeField + CanonicalSerialize>(x: F) -> Sp1Fp {
+        let mut buf = [0u8; 32];
+        x.serialize_uncompressed(&mut buf[..]).unwrap();
+        Sp1Fp(bytemuck::cast(buf))
     }
 
     #[inline(always)]
-    pub(crate) fn to_ark<F: PrimeField<BigInt = BigInt<4>>>(x: Sp1Fp) -> F {
-        F::from_bigint(BigInt::<4>(x.0)).unwrap()
+    pub(crate) fn to_ark<F: PrimeField + CanonicalDeserialize>(x: Sp1Fp) -> F {
+        let buf: [u8; 32] = bytemuck::cast(x.0);
+        F::deserialize_uncompressed(&buf[..]).unwrap()
     }
 
     #[inline(always)]
