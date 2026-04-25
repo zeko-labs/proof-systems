@@ -91,11 +91,6 @@ impl<F: PrimeField> ScalarChallenge<F> {
     }
 }
 
-#[cfg(target_os = "zkvm")]
-pub type DefaultFqSponge<P, SC, const FULL_ROUNDS: usize> =
-    crate::sp1::Sp1FqSponge<P, SC, FULL_ROUNDS>;
-
-#[cfg(not(target_os = "zkvm"))]
 #[derive(Clone)]
 pub struct DefaultFqSponge<P: SWCurveConfig, SC: SpongeConstants, const FULL_ROUNDS: usize>
 where
@@ -105,11 +100,6 @@ where
     pub last_squeezed: Vec<u64>,
 }
 
-#[cfg(target_os = "zkvm")]
-pub type DefaultFrSponge<Fr, SC, const FULL_ROUNDS: usize> =
-    crate::sp1::Sp1FrSponge<Fr, SC, FULL_ROUNDS>;
-
-#[cfg(not(target_os = "zkvm"))]
 pub struct DefaultFrSponge<
     Fr: Field + CanonicalSerialize + CanonicalDeserialize,
     SC: SpongeConstants,
@@ -119,7 +109,6 @@ pub struct DefaultFrSponge<
     pub last_squeezed: Vec<u64>,
 }
 
-#[cfg(not(target_os = "zkvm"))]
 impl<const FULL_ROUNDS: usize, Fr> From<&'static ArithmeticSpongeParams<Fr, FULL_ROUNDS>>
     for DefaultFrSponge<Fr, PlonkSpongeConstantsKimchi, FULL_ROUNDS>
 where
@@ -159,7 +148,6 @@ fn take_first_limbs(buf: &mut Vec<u64>, num_limbs: usize) -> Vec<u64> {
     out
 }
 
-#[cfg(not(target_os = "zkvm"))]
 impl<
         Fr: PrimeField + CanonicalSerialize + CanonicalDeserialize,
         SC: SpongeConstants,
@@ -185,7 +173,6 @@ impl<
     }
 }
 
-#[cfg(not(target_os = "zkvm"))]
 impl<P: SWCurveConfig, SC: SpongeConstants, const FULL_ROUNDS: usize>
     DefaultFqSponge<P, SC, FULL_ROUNDS>
 where
@@ -218,7 +205,6 @@ where
     }
 }
 
-#[cfg(not(target_os = "zkvm"))]
 impl<P: SWCurveConfig, SC: SpongeConstants, const FULL_ROUNDS: usize>
     FqSponge<P::BaseField, Affine<P>, P::ScalarField, FULL_ROUNDS>
     for DefaultFqSponge<P, SC, FULL_ROUNDS>

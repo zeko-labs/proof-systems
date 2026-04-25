@@ -28,7 +28,6 @@ serde.workspace = true
 serde_with.workspace = true
 bytemuck.workspace = true
 sp1-lib.workspace = true
-crypto-bigint.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
