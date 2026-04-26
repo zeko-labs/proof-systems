@@ -562,6 +562,9 @@ mod zkvm_fast {
 
     type Sp1Limbs = [u64; 4];
 
+    const PALLAS_M: Sp1Limbs = super::PALLAS_BASE_MODULUS;
+    const VESTA_M: Sp1Limbs = super::VESTA_BASE_MODULUS;
+
     #[derive(Clone, Copy)]
     #[repr(transparent)]
     pub(crate) struct Sp1Fp(pub(crate) Sp1Limbs);
@@ -580,9 +583,9 @@ mod zkvm_fast {
     }
 
     #[inline(always)]
-    pub(crate) fn add(a: Sp1Fp, b: Sp1Fp, modulus: Sp1Limbs) -> Sp1Fp {
-        let mut carry = 0u64;
+    pub(crate) fn add(a: Sp1Fp, b: Sp1Fp, m: Sp1Limbs) -> Sp1Fp {
         let mut out = [0u64; 4];
+        let mut carry = 0u64;
 
         for i in 0..4 {
             let (s1, c1) = a.0[i].overflowing_add(b.0[i]);
@@ -591,30 +594,10 @@ mod zkvm_fast {
             carry = (c1 as u64) + (c2 as u64);
         }
 
-        let need_reduce = carry != 0 || {
-            let mut ge = true;
-            for i in (0..4).rev() {
-                if out[i] > modulus[i] {
-                    break;
-                }
-                if out[i] < modulus[i] {
-                    ge = false;
-                    break;
-                }
-            }
-            ge
-        };
-
+        let need_reduce = carry != 0 || ge_limbs(out, m);
         if need_reduce {
-            let mut borrow = 0u64;
-            for i in 0..4 {
-                let (d1, b1) = out[i].overflowing_sub(modulus[i]);
-                let (d2, b2) = d1.overflowing_sub(borrow);
-                out[i] = d2;
-                borrow = (b1 as u64) + (b2 as u64);
-            }
+            out = sub_limbs(out, m);
         }
-
         Sp1Fp(out)
     }
 
@@ -628,278 +611,272 @@ mod zkvm_fast {
                 return false;
             }
         }
-
         true
     }
 
     #[inline(always)]
-    fn sub_modulus_once(mut x: Sp1Limbs, modulus: Sp1Limbs) -> Sp1Limbs {
+    fn sub_limbs(mut x: Sp1Limbs, m: Sp1Limbs) -> Sp1Limbs {
         let mut borrow = 0u64;
-
         for i in 0..4 {
-            let (d1, b1) = x[i].overflowing_sub(modulus[i]);
+            let (d1, b1) = x[i].overflowing_sub(m[i]);
             let (d2, b2) = d1.overflowing_sub(borrow);
-
             x[i] = d2;
             borrow = (b1 as u64) + (b2 as u64);
         }
-
         x
     }
 
     #[inline(always)]
-    fn add3_reduce(a: Sp1Fp, b: Sp1Fp, c: Sp1Fp, modulus: Sp1Limbs) -> Sp1Fp {
+    fn add3_reduce(a: Sp1Fp, b: Sp1Fp, c: Sp1Fp, m: Sp1Limbs) -> Sp1Fp {
         let mut out = [0u64; 4];
         let mut carry = 0u64;
-
         for i in 0..4 {
             let sum = a.0[i] as u128 + b.0[i] as u128 + c.0[i] as u128 + carry as u128;
             out[i] = sum as u64;
             carry = (sum >> 64) as u64;
         }
-
-        // For Pasta fields: a,b,c < p, so sum < 3p.
-        // That means at most two subtractions are needed.
-        if carry != 0 || ge_limbs(out, modulus) {
-            out = sub_modulus_once(out, modulus);
+        if carry != 0 || ge_limbs(out, m) {
+            out = sub_limbs(out, m);
         }
-
-        if ge_limbs(out, modulus) {
-            out = sub_modulus_once(out, modulus);
+        if ge_limbs(out, m) {
+            out = sub_limbs(out, m);
         }
-
         Sp1Fp(out)
     }
 
     #[inline(always)]
-    fn mul(a: Sp1Fp, b: Sp1Fp, modulus: Sp1Limbs) -> Sp1Fp {
+    fn mul(a: Sp1Fp, b: Sp1Fp, m: Sp1Limbs) -> Sp1Fp {
         let mut out = [0u64; 4];
         #[allow(unsafe_code)]
         unsafe {
-            sp1_lib::sys_bigint(&mut out, 0, &a.0, &b.0, &modulus);
+            sp1_lib::sys_bigint(&mut out, 0, &a.0, &b.0, &m);
         }
         Sp1Fp(out)
     }
 
     #[inline(always)]
-    fn pow7(x: Sp1Fp, modulus: Sp1Limbs) -> Sp1Fp {
-        #[cfg(target_os = "zkvm")]
-        zk_cycle_start!("zkvm_pow7");
-
-        let x2 = mul(x, x, modulus);
-        let x4 = mul(x2, x2, modulus);
-        let x6 = mul(x4, x2, modulus);
-        let out = mul(x6, x, modulus);
-
-        #[cfg(target_os = "zkvm")]
-        zk_cycle_end!("zkvm_pow7");
-
-        out
+    fn pow7(x: Sp1Fp, m: Sp1Limbs) -> Sp1Fp {
+        let x2 = mul(x, x, m);
+        let x4 = mul(x2, x2, m);
+        let x6 = mul(x4, x2, m);
+        mul(x6, x, m)
     }
 
+    // ---------------------------------------------------------------------------
+    // Pallas — toutes les constantes sont statiques
+    // ---------------------------------------------------------------------------
+
     #[inline(always)]
-    fn apply_mds_matrix_sp1<SC: SpongeConstants>(
-        mds: &[[Sp1Limbs; 3]; 3],
-        state: &mut [Sp1Fp; 3],
-        modulus: Sp1Limbs,
-    ) {
-        zk_cycle_start!("zkvm_apply_mds");
-
+    fn apply_mds_pallas<SC: SpongeConstants>(s: &mut [Sp1Fp; 3]) {
         if !SC::PERM_FULL_MDS {
-            let s0 = state[0];
-            let s1 = state[1];
-            let s2 = state[2];
-
-            state[0] = add(s0, s2, modulus);
-            state[1] = add(s0, s1, modulus);
-            state[2] = add(s1, s2, modulus);
-
-            zk_cycle_end!("zkvm_apply_mds");
+            let (s0, s1, s2) = (s[0], s[1], s[2]);
+            s[0] = add(s0, s2, PALLAS_M);
+            s[1] = add(s0, s1, PALLAS_M);
+            s[2] = add(s1, s2, PALLAS_M);
             return;
         }
-
-        let s0 = state[0];
-        let s1 = state[1];
-        let s2 = state[2];
-
-        let m00 = Sp1Fp(mds[0][0]);
-        let m01 = Sp1Fp(mds[0][1]);
-        let m02 = Sp1Fp(mds[0][2]);
-
-        let m10 = Sp1Fp(mds[1][0]);
-        let m11 = Sp1Fp(mds[1][1]);
-        let m12 = Sp1Fp(mds[1][2]);
-
-        let m20 = Sp1Fp(mds[2][0]);
-        let m21 = Sp1Fp(mds[2][1]);
-        let m22 = Sp1Fp(mds[2][2]);
-
-        state[0] = add3_reduce(
-            mul(m00, s0, modulus),
-            mul(m01, s1, modulus),
-            mul(m02, s2, modulus),
-            modulus,
+        let (s0, s1, s2) = (s[0], s[1], s[2]);
+        s[0] = add3_reduce(
+            mul(Sp1Fp(fp_sp1::MDS[0][0]), s0, PALLAS_M),
+            mul(Sp1Fp(fp_sp1::MDS[0][1]), s1, PALLAS_M),
+            mul(Sp1Fp(fp_sp1::MDS[0][2]), s2, PALLAS_M),
+            PALLAS_M,
         );
-
-        state[1] = add3_reduce(
-            mul(m10, s0, modulus),
-            mul(m11, s1, modulus),
-            mul(m12, s2, modulus),
-            modulus,
+        s[1] = add3_reduce(
+            mul(Sp1Fp(fp_sp1::MDS[1][0]), s0, PALLAS_M),
+            mul(Sp1Fp(fp_sp1::MDS[1][1]), s1, PALLAS_M),
+            mul(Sp1Fp(fp_sp1::MDS[1][2]), s2, PALLAS_M),
+            PALLAS_M,
         );
-
-        state[2] = add3_reduce(
-            mul(m20, s0, modulus),
-            mul(m21, s1, modulus),
-            mul(m22, s2, modulus),
-            modulus,
+        s[2] = add3_reduce(
+            mul(Sp1Fp(fp_sp1::MDS[2][0]), s0, PALLAS_M),
+            mul(Sp1Fp(fp_sp1::MDS[2][1]), s1, PALLAS_M),
+            mul(Sp1Fp(fp_sp1::MDS[2][2]), s2, PALLAS_M),
+            PALLAS_M,
         );
-
-        zk_cycle_end!("zkvm_apply_mds");
     }
 
     #[inline(always)]
-    fn full_round_sp1<SC: SpongeConstants>(
-        state: &mut [Sp1Fp; 3],
-        mds: &[[Sp1Limbs; 3]; 3],
-        rc: &[Sp1Limbs; 3],
-        modulus: Sp1Limbs,
-    ) {
-        state[0] = pow7(state[0], modulus);
-        state[1] = pow7(state[1], modulus);
-        state[2] = pow7(state[2], modulus);
-
-        apply_mds_matrix_sp1::<SC>(mds, state, modulus);
-
-        state[0] = add(state[0], Sp1Fp(rc[0]), modulus);
-        state[1] = add(state[1], Sp1Fp(rc[1]), modulus);
-        state[2] = add(state[2], Sp1Fp(rc[2]), modulus);
+    fn full_round_pallas<SC: SpongeConstants>(s: &mut [Sp1Fp; 3], r: usize) {
+        s[0] = pow7(s[0], PALLAS_M);
+        s[1] = pow7(s[1], PALLAS_M);
+        s[2] = pow7(s[2], PALLAS_M);
+        apply_mds_pallas::<SC>(s);
+        s[0] = add(s[0], Sp1Fp(fp_sp1::ROUND_CONSTANTS[r][0]), PALLAS_M);
+        s[1] = add(s[1], Sp1Fp(fp_sp1::ROUND_CONSTANTS[r][1]), PALLAS_M);
+        s[2] = add(s[2], Sp1Fp(fp_sp1::ROUND_CONSTANTS[r][2]), PALLAS_M);
     }
 
     #[inline(always)]
-    fn half_rounds_sp1<SC: SpongeConstants>(
-        mds: &[[Sp1Limbs; 3]; 3],
-        rc: &[[Sp1Limbs; 3]; KIMCHI_FULL_ROUNDS],
-        state: &mut [Sp1Fp; 3],
-        modulus: Sp1Limbs,
-    ) {
+    fn half_rounds_pallas<SC: SpongeConstants>(s: &mut [Sp1Fp; 3]) {
         for r in 0..SC::PERM_HALF_ROUNDS_FULL {
-            state[0] = add(state[0], Sp1Fp(rc[r][0]), modulus);
-            state[1] = add(state[1], Sp1Fp(rc[r][1]), modulus);
-            state[2] = add(state[2], Sp1Fp(rc[r][2]), modulus);
-
-            state[0] = pow7(state[0], modulus);
-            state[1] = pow7(state[1], modulus);
-            state[2] = pow7(state[2], modulus);
-
-            apply_mds_matrix_sp1::<SC>(mds, state, modulus);
+            s[0] = add(s[0], Sp1Fp(fp_sp1::ROUND_CONSTANTS[r][0]), PALLAS_M);
+            s[1] = add(s[1], Sp1Fp(fp_sp1::ROUND_CONSTANTS[r][1]), PALLAS_M);
+            s[2] = add(s[2], Sp1Fp(fp_sp1::ROUND_CONSTANTS[r][2]), PALLAS_M);
+            s[0] = pow7(s[0], PALLAS_M);
+            s[1] = pow7(s[1], PALLAS_M);
+            s[2] = pow7(s[2], PALLAS_M);
+            apply_mds_pallas::<SC>(s);
         }
-
         for r in 0..SC::PERM_ROUNDS_PARTIAL {
             let rr = SC::PERM_HALF_ROUNDS_FULL + r;
-
-            state[0] = add(state[0], Sp1Fp(rc[rr][0]), modulus);
-            state[1] = add(state[1], Sp1Fp(rc[rr][1]), modulus);
-            state[2] = add(state[2], Sp1Fp(rc[rr][2]), modulus);
-
-            state[0] = pow7(state[0], modulus);
-
-            apply_mds_matrix_sp1::<SC>(mds, state, modulus);
+            s[0] = add(s[0], Sp1Fp(fp_sp1::ROUND_CONSTANTS[rr][0]), PALLAS_M);
+            s[1] = add(s[1], Sp1Fp(fp_sp1::ROUND_CONSTANTS[rr][1]), PALLAS_M);
+            s[2] = add(s[2], Sp1Fp(fp_sp1::ROUND_CONSTANTS[rr][2]), PALLAS_M);
+            s[0] = pow7(s[0], PALLAS_M);
+            apply_mds_pallas::<SC>(s);
         }
-
         for r in 0..SC::PERM_HALF_ROUNDS_FULL {
             let rr = SC::PERM_HALF_ROUNDS_FULL + SC::PERM_ROUNDS_PARTIAL + r;
-
-            state[0] = add(state[0], Sp1Fp(rc[rr][0]), modulus);
-            state[1] = add(state[1], Sp1Fp(rc[rr][1]), modulus);
-            state[2] = add(state[2], Sp1Fp(rc[rr][2]), modulus);
-
-            state[0] = pow7(state[0], modulus);
-            state[1] = pow7(state[1], modulus);
-            state[2] = pow7(state[2], modulus);
-
-            apply_mds_matrix_sp1::<SC>(mds, state, modulus);
+            s[0] = add(s[0], Sp1Fp(fp_sp1::ROUND_CONSTANTS[rr][0]), PALLAS_M);
+            s[1] = add(s[1], Sp1Fp(fp_sp1::ROUND_CONSTANTS[rr][1]), PALLAS_M);
+            s[2] = add(s[2], Sp1Fp(fp_sp1::ROUND_CONSTANTS[rr][2]), PALLAS_M);
+            s[0] = pow7(s[0], PALLAS_M);
+            s[1] = pow7(s[1], PALLAS_M);
+            s[2] = pow7(s[2], PALLAS_M);
+            apply_mds_pallas::<SC>(s);
         }
     }
 
     #[inline(always)]
-    fn permute_with_constants<SC: SpongeConstants>(
-        state: &mut [[u64; 4]; 3],
-        mds: &[[Sp1Limbs; 3]; 3],
-        rc: &[[Sp1Limbs; 3]; KIMCHI_FULL_ROUNDS],
-        modulus: Sp1Limbs,
-    ) {
+    fn permute_pallas<SC: SpongeConstants>(state: &mut [[u64; 4]; 3]) {
         let mut s = [Sp1Fp(state[0]), Sp1Fp(state[1]), Sp1Fp(state[2])];
-
         if SC::PERM_HALF_ROUNDS_FULL == 0 {
             if SC::PERM_INITIAL_ARK {
-                s[0] = add(s[0], Sp1Fp(rc[0][0]), modulus);
-                s[1] = add(s[1], Sp1Fp(rc[0][1]), modulus);
-                s[2] = add(s[2], Sp1Fp(rc[0][2]), modulus);
-
+                s[0] = add(s[0], Sp1Fp(fp_sp1::ROUND_CONSTANTS[0][0]), PALLAS_M);
+                s[1] = add(s[1], Sp1Fp(fp_sp1::ROUND_CONSTANTS[0][1]), PALLAS_M);
+                s[2] = add(s[2], Sp1Fp(fp_sp1::ROUND_CONSTANTS[0][2]), PALLAS_M);
                 for r in 0..SC::PERM_ROUNDS_FULL {
-                    full_round_sp1::<SC>(&mut s, mds, &rc[r + 1], modulus);
+                    full_round_pallas::<SC>(&mut s, r + 1);
                 }
             } else {
                 for r in 0..SC::PERM_ROUNDS_FULL {
-                    full_round_sp1::<SC>(&mut s, mds, &rc[r], modulus);
+                    full_round_pallas::<SC>(&mut s, r);
                 }
             }
         } else {
-            half_rounds_sp1::<SC>(mds, rc, &mut s, modulus);
+            half_rounds_pallas::<SC>(&mut s);
         }
-
         state[0] = s[0].0;
         state[1] = s[1].0;
         state[2] = s[2].0;
     }
 
+    // ---------------------------------------------------------------------------
+    // Vesta — même structure avec fq_sp1 et VESTA_M
+    // ---------------------------------------------------------------------------
+
+    #[inline(always)]
+    fn apply_mds_vesta<SC: SpongeConstants>(s: &mut [Sp1Fp; 3]) {
+        if !SC::PERM_FULL_MDS {
+            let (s0, s1, s2) = (s[0], s[1], s[2]);
+            s[0] = add(s0, s2, VESTA_M);
+            s[1] = add(s0, s1, VESTA_M);
+            s[2] = add(s1, s2, VESTA_M);
+            return;
+        }
+        let (s0, s1, s2) = (s[0], s[1], s[2]);
+        s[0] = add3_reduce(
+            mul(Sp1Fp(fq_sp1::MDS[0][0]), s0, VESTA_M),
+            mul(Sp1Fp(fq_sp1::MDS[0][1]), s1, VESTA_M),
+            mul(Sp1Fp(fq_sp1::MDS[0][2]), s2, VESTA_M),
+            VESTA_M,
+        );
+        s[1] = add3_reduce(
+            mul(Sp1Fp(fq_sp1::MDS[1][0]), s0, VESTA_M),
+            mul(Sp1Fp(fq_sp1::MDS[1][1]), s1, VESTA_M),
+            mul(Sp1Fp(fq_sp1::MDS[1][2]), s2, VESTA_M),
+            VESTA_M,
+        );
+        s[2] = add3_reduce(
+            mul(Sp1Fp(fq_sp1::MDS[2][0]), s0, VESTA_M),
+            mul(Sp1Fp(fq_sp1::MDS[2][1]), s1, VESTA_M),
+            mul(Sp1Fp(fq_sp1::MDS[2][2]), s2, VESTA_M),
+            VESTA_M,
+        );
+    }
+
+    #[inline(always)]
+    fn full_round_vesta<SC: SpongeConstants>(s: &mut [Sp1Fp; 3], r: usize) {
+        s[0] = pow7(s[0], VESTA_M);
+        s[1] = pow7(s[1], VESTA_M);
+        s[2] = pow7(s[2], VESTA_M);
+        apply_mds_vesta::<SC>(s);
+        s[0] = add(s[0], Sp1Fp(fq_sp1::ROUND_CONSTANTS[r][0]), VESTA_M);
+        s[1] = add(s[1], Sp1Fp(fq_sp1::ROUND_CONSTANTS[r][1]), VESTA_M);
+        s[2] = add(s[2], Sp1Fp(fq_sp1::ROUND_CONSTANTS[r][2]), VESTA_M);
+    }
+
+    #[inline(always)]
+    fn half_rounds_vesta<SC: SpongeConstants>(s: &mut [Sp1Fp; 3]) {
+        for r in 0..SC::PERM_HALF_ROUNDS_FULL {
+            s[0] = add(s[0], Sp1Fp(fq_sp1::ROUND_CONSTANTS[r][0]), VESTA_M);
+            s[1] = add(s[1], Sp1Fp(fq_sp1::ROUND_CONSTANTS[r][1]), VESTA_M);
+            s[2] = add(s[2], Sp1Fp(fq_sp1::ROUND_CONSTANTS[r][2]), VESTA_M);
+            s[0] = pow7(s[0], VESTA_M);
+            s[1] = pow7(s[1], VESTA_M);
+            s[2] = pow7(s[2], VESTA_M);
+            apply_mds_vesta::<SC>(s);
+        }
+        for r in 0..SC::PERM_ROUNDS_PARTIAL {
+            let rr = SC::PERM_HALF_ROUNDS_FULL + r;
+            s[0] = add(s[0], Sp1Fp(fq_sp1::ROUND_CONSTANTS[rr][0]), VESTA_M);
+            s[1] = add(s[1], Sp1Fp(fq_sp1::ROUND_CONSTANTS[rr][1]), VESTA_M);
+            s[2] = add(s[2], Sp1Fp(fq_sp1::ROUND_CONSTANTS[rr][2]), VESTA_M);
+            s[0] = pow7(s[0], VESTA_M);
+            apply_mds_vesta::<SC>(s);
+        }
+        for r in 0..SC::PERM_HALF_ROUNDS_FULL {
+            let rr = SC::PERM_HALF_ROUNDS_FULL + SC::PERM_ROUNDS_PARTIAL + r;
+            s[0] = add(s[0], Sp1Fp(fq_sp1::ROUND_CONSTANTS[rr][0]), VESTA_M);
+            s[1] = add(s[1], Sp1Fp(fq_sp1::ROUND_CONSTANTS[rr][1]), VESTA_M);
+            s[2] = add(s[2], Sp1Fp(fq_sp1::ROUND_CONSTANTS[rr][2]), VESTA_M);
+            s[0] = pow7(s[0], VESTA_M);
+            s[1] = pow7(s[1], VESTA_M);
+            s[2] = pow7(s[2], VESTA_M);
+            apply_mds_vesta::<SC>(s);
+        }
+    }
+
+    #[inline(always)]
+    fn permute_vesta<SC: SpongeConstants>(state: &mut [[u64; 4]; 3]) {
+        let mut s = [Sp1Fp(state[0]), Sp1Fp(state[1]), Sp1Fp(state[2])];
+        if SC::PERM_HALF_ROUNDS_FULL == 0 {
+            if SC::PERM_INITIAL_ARK {
+                s[0] = add(s[0], Sp1Fp(fq_sp1::ROUND_CONSTANTS[0][0]), VESTA_M);
+                s[1] = add(s[1], Sp1Fp(fq_sp1::ROUND_CONSTANTS[0][1]), VESTA_M);
+                s[2] = add(s[2], Sp1Fp(fq_sp1::ROUND_CONSTANTS[0][2]), VESTA_M);
+                for r in 0..SC::PERM_ROUNDS_FULL {
+                    full_round_vesta::<SC>(&mut s, r + 1);
+                }
+            } else {
+                for r in 0..SC::PERM_ROUNDS_FULL {
+                    full_round_vesta::<SC>(&mut s, r);
+                }
+            }
+        } else {
+            half_rounds_vesta::<SC>(&mut s);
+        }
+        state[0] = s[0].0;
+        state[1] = s[1].0;
+        state[2] = s[2].0;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Point d'entrée public
+    // ---------------------------------------------------------------------------
+
     pub(crate) fn permute_state<SC: SpongeConstants, const FULL_ROUNDS: usize>(
         state: &mut [[u64; 4]; 3],
         field_kind: PastaFieldKind,
-        modulus: Sp1Limbs,
+        _modulus: Sp1Limbs, // ignoré — constantes statiques utilisées
     ) {
-        #[cfg(target_os = "zkvm")]
-        zk_cycle_start!("zkvm_permute_state_total");
-
         if FULL_ROUNDS != KIMCHI_FULL_ROUNDS {
-            #[cfg(target_os = "zkvm")]
-            zk_cycle_end!("zkvm_permute_state_total");
             return;
         }
-
         match field_kind {
-            PastaFieldKind::PallasFp => {
-                #[cfg(target_os = "zkvm")]
-                zk_cycle_start!("zkvm_permute_pallas");
-
-                permute_with_constants::<SC>(
-                    state,
-                    &fp_sp1::MDS,
-                    &fp_sp1::ROUND_CONSTANTS,
-                    modulus,
-                );
-
-                #[cfg(target_os = "zkvm")]
-                zk_cycle_end!("zkvm_permute_pallas");
-            }
-            PastaFieldKind::VestaFq => {
-                #[cfg(target_os = "zkvm")]
-                zk_cycle_start!("zkvm_permute_vesta");
-
-                permute_with_constants::<SC>(
-                    state,
-                    &fq_sp1::MDS,
-                    &fq_sp1::ROUND_CONSTANTS,
-                    modulus,
-                );
-
-                #[cfg(target_os = "zkvm")]
-                zk_cycle_end!("zkvm_permute_vesta");
-            }
+            PastaFieldKind::PallasFp => permute_pallas::<SC>(state),
+            PastaFieldKind::VestaFq => permute_vesta::<SC>(state),
         }
-
-        #[cfg(target_os = "zkvm")]
-        zk_cycle_end!("zkvm_permute_state_total");
     }
 }
