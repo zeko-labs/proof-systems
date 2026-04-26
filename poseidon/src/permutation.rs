@@ -13,14 +13,14 @@ const MDS_WIDTH: usize = 3;
 #[cfg(target_os = "zkvm")]
 macro_rules! zk_cycle_start {
     ($name:expr) => {
-        std::println!(concat!("cycle-tracker-start: ", $name));
+        // std::println!(concat!("cycle-tracker-start: ", $name));
     };
 }
 
 #[cfg(target_os = "zkvm")]
 macro_rules! zk_cycle_end {
     ($name:expr) => {
-        std::println!(concat!("cycle-tracker-end: ", $name));
+        //std::println!(concat!("cycle-tracker-end: ", $name));
     };
 }
 
