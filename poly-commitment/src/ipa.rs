@@ -240,7 +240,7 @@ impl<G: CommitmentCurve> SRS<G> {
         let mut rand_base_i = G::ScalarField::one();
         let mut sg_rand_base_i = G::ScalarField::one();
 
-        println!("cycle-tracker-start: ipa_build_vectors");
+        //println!("cycle-tracker-start: ipa_build_vectors");
 
         for BatchEvaluationProof {
             sponge,
@@ -317,19 +317,19 @@ impl<G: CommitmentCurve> SRS<G> {
             sg_rand_base_i *= &sg_rand_base;
         }
 
-        println!("cycle-tracker-end: ipa_build_vectors");
+        //println!("cycle-tracker-end: ipa_build_vectors");
 
         // Fixed base: only H remains
-        println!("cycle-tracker-start: ipa_fixed_msm");
+        //println!("cycle-tracker-start: ipa_fixed_msm");
         let fixed_res = if h_scalar.is_zero() {
             G::Group::zero()
         } else {
             self.h.into_group() * h_scalar
         };
-        println!("cycle-tracker-end: ipa_fixed_msm");
+        //println!("cycle-tracker-end: ipa_fixed_msm");
 
         // Dynamic MSM
-        println!("cycle-tracker-start: ipa_dynamic_msm");
+        //println!("cycle-tracker-start: ipa_dynamic_msm");
         let dynamic_res = if dynamic_points.is_empty() {
             G::Group::zero()
         } else {
@@ -359,7 +359,7 @@ impl<G: CommitmentCurve> SRS<G> {
                     })
             }
         };
-        println!("cycle-tracker-end: ipa_dynamic_msm");
+        //println!("cycle-tracker-end: ipa_dynamic_msm");
 
         let mut msm_res = fixed_res;
         msm_res += dynamic_res;

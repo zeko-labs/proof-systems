@@ -7,7 +7,7 @@ use crate::{
         argument::ArgumentType,
         berkeley_columns::{BerkeleyChallenges, Column},
         constraints::ConstraintSystem,
-        expr::{Constants, PolishToken},
+        expr::{Constants, FeatureFlag, PolishToken},
         gate::GateType,
         lookup::{lookups::LookupPattern, tables::combine_table},
         polynomials::permutation,
@@ -1257,7 +1257,7 @@ where
     //~
 
     //~ 1. If there's no proof to verify, the proof validates trivially.
-   if proofs.is_empty() {
+    if proofs.is_empty() {
         return Ok(());
     }
 
@@ -1271,26 +1271,35 @@ where
     // ------------------------------------------------------------------
     // Stage 1 — Partial verification (sponge, challenges, evaluations)
     // ------------------------------------------------------------------
-    println!("cycle-tracker-start: kimchi_to_batch");
+    //    println!("cycle-tracker-start: kimchi_to_batch");
     let mut batch = vec![];
     for context in proofs {
-        let Context { verifier_index, proof, public_input } = context;
-        batch.push(to_batch::<FULL_ROUNDS, G, EFqSponge, EFrSponge, OpeningProof>(
-            verifier_index, proof, public_input,
-        )?);
+        let Context {
+            verifier_index,
+            proof,
+            public_input,
+        } = context;
+        batch.push(to_batch::<
+            FULL_ROUNDS,
+            G,
+            EFqSponge,
+            EFrSponge,
+            OpeningProof,
+        >(verifier_index, proof, public_input)?);
     }
-    println!("cycle-tracker-end: kimchi_to_batch");
+    //println!("cycle-tracker-end: kimchi_to_batch");
 
     // ------------------------------------------------------------------
     // Stage 2 — IPA opening verification (the MSM)
     // ------------------------------------------------------------------
-    println!("cycle-tracker-start: kimchi_ipa_opening");
+    //println!("cycle-tracker-start: kimchi_ipa_opening");
     let result = OpeningProof::verify(srs, group_map, &mut batch, &mut thread_rng());
-    println!("cycle-tracker-end: kimchi_ipa_opening");
+
+    //println!("cycle-tracker-end: kimchi_ipa_opening");
 
     if result {
         Ok(())
     } else {
         Err(VerifyError::OpenProof)
-}
+    }
 }
