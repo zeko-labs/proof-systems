@@ -380,23 +380,25 @@ impl<G: CommitmentCurve> SRS<G> {
         };
 
         #[cfg(not(target_os = "zkvm"))]
-        let msm_res = {
-            // chemin original
-            let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
-            let chunk_size = points.len() / 2;
-            points
-                .into_par_iter()
-                .chunks(chunk_size)
-                .zip(scalars_bigint.into_par_iter().chunks(chunk_size))
-                .map(|(bases, coeffs)| G::Group::msm_bigint(&bases, &coeffs))
-                .reduce(G::Group::zero, |mut l, r| {
-                    l += r;
-                    l
-                })
-        };
+        return {
+            let msm_res = {
+                // chemin original
+                let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
+                let chunk_size = points.len() / 2;
+                points
+                    .into_par_iter()
+                    .chunks(chunk_size)
+                    .zip(scalars_bigint.into_par_iter().chunks(chunk_size))
+                    .map(|(bases, coeffs)| G::Group::msm_bigint(&bases, &coeffs))
+                    .reduce(G::Group::zero, |mut l, r| {
+                        l += r;
+                        l
+                    })
+            };
 
-        println!("cycle-tracker-end: ipa_fixed_msm");
-        msm_res == G::Group::zero()
+            println!("cycle-tracker-end: ipa_fixed_msm");
+            msm_res == G::Group::zero()
+        };
     }
 
     /// Create a trusted-setup SRS instance for circuits with
