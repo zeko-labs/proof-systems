@@ -223,24 +223,39 @@ impl<G: CommitmentCurve> SRS<G> {
         RNG: RngCore + CryptoRng,
         G::BaseField: PrimeField,
     {
+        // Verifier checks for all i:
+        // c_i Q_i + delta_i = z1_i (G_i + b_i U_i) + z2_i H
+        //
+        // Sampled at random evalscale, it suffices to check:
+        // 0 == sum_i evalscale^i (c_i Q_i + delta_i - (z1_i (G_i + b_i U_i) + z2_i H))
+        //
+        // G_i is a multiexp on self.g, so we batch across proofs.
+        // We also verify that the sg component equals the polynomial commitment to s.
+
         let nonzero_length = self.g.len();
         let max_rounds = math::ceil_log2(nonzero_length);
         let padded_length = 1 << max_rounds;
         let (_, endo_r) = endos::<G>();
 
-        // H scalar accumulator (fixed base)
-        let mut h_scalar = G::ScalarField::zero();
+        let padding = padded_length - nonzero_length;
 
-        // Dynamic MSM inputs
-        let mut dynamic_points = Vec::new();
-        let mut dynamic_scalars = Vec::new();
+        // Fixed-base points: H followed by G[0..n] followed by zero padding
+        let mut points = vec![self.h];
+        points.extend(self.g.clone());
+        points.extend(vec![G::zero(); padding]);
 
+        // Fixed-base scalars — same length as points
+        let mut scalars = vec![G::ScalarField::zero(); padded_length + 1];
+        assert_eq!(scalars.len(), points.len());
+
+        // Random combiners sampled once for the whole batch
         let rand_base = G::ScalarField::rand(rng);
         let sg_rand_base = G::ScalarField::rand(rng);
+
         let mut rand_base_i = G::ScalarField::one();
         let mut sg_rand_base_i = G::ScalarField::one();
 
-        //println!("cycle-tracker-start: ipa_build_vectors");
+        println!("cycle-tracker-start: ipa_build_vectors");
 
         for BatchEvaluationProof {
             sponge,
@@ -254,6 +269,7 @@ impl<G: CommitmentCurve> SRS<G> {
         {
             sponge.absorb_fr(&[shift_scalar::<G>(*combined_inner_product)]);
 
+            // Derive the base point U from the sponge challenge
             let u_base: G = {
                 let t = sponge.challenge_fq();
                 let (x, y) = group_map.to_group(t);
@@ -265,6 +281,8 @@ impl<G: CommitmentCurve> SRS<G> {
             sponge.absorb_g(&[opening.delta]);
             let c = ScalarChallenge(sponge.challenge()).to_field(&endo_r);
 
+            // b0 = < s, sum_i evalscale^i pows(evaluation_points[i]) >
+            //    = sum_i evalscale^i b_poly(chal, evaluation_points[i])
             let b0 = {
                 let mut scale = G::ScalarField::one();
                 let mut res = G::ScalarField::zero();
@@ -276,93 +294,102 @@ impl<G: CommitmentCurve> SRS<G> {
                 res
             };
 
+            // s = b_poly_coefficients(chal) — the vector such that <s, G> = opening.sg
+            let s = b_poly_coefficients(&chal);
+
             let neg_rand_base_i = -rand_base_i;
 
-            // opening.sg contributions merged
-            dynamic_points.push(opening.sg);
-            dynamic_scalars.push(neg_rand_base_i * opening.z1);
+            // TERM: -rand_base_i * z1 * opening.sg
+            //       -sg_rand_base_i * opening.sg   (binding check part 1)
+            points.push(opening.sg);
+            scalars.push(neg_rand_base_i * opening.z1 - sg_rand_base_i);
 
-            // H (fixed base — single scalar accumulation)
-            h_scalar -= rand_base_i * opening.z2;
+            // TERM: sg_rand_base_i * <s, self.g>   (binding check part 2)
+            // Together with the term above, enforces opening.sg == <s, G>
+            // in the final zero-check.
+            {
+                #[cfg(not(target_os = "zkvm"))]
+                let terms: Vec<_> = s.par_iter().map(|s| sg_rand_base_i * s).collect();
 
-            // u_base terms
-            dynamic_scalars.push(neg_rand_base_i * (opening.z1 * b0));
-            dynamic_points.push(u_base);
+                // On SP1 — sequential iteration, par_iter has no benefit
+                #[cfg(target_os = "zkvm")]
+                let terms: Vec<_> = s.iter().map(|s| sg_rand_base_i * s).collect();
 
-            let rand_base_i_c_i = c * rand_base_i;
-
-            // L/R commitments
-            for ((l, r), (u_inv, u)) in opening.lr.iter().zip(chal_inv.iter().zip(chal.iter())) {
-                dynamic_points.push(*l);
-                dynamic_scalars.push(rand_base_i_c_i * u_inv);
-                dynamic_points.push(*r);
-                dynamic_scalars.push(rand_base_i_c_i * u);
+                for (i, term) in terms.iter().enumerate() {
+                    scalars[i + 1] += term;
+                }
             }
 
-            // Commitment openings
+            // TERM: -rand_base_i * z2 * H
+            scalars[0] -= &(rand_base_i * opening.z2);
+
+            // TERM: -rand_base_i * z1 * b0 * U
+            points.push(u_base);
+            scalars.push(neg_rand_base_i * (opening.z1 * b0));
+
+            // TERM: rand_base_i * c_i * (sum_j chal_inv[j] L[j] + chal[j] R[j] + P')
+            let rand_base_i_c_i = c * rand_base_i;
+            for ((l, r), (u_inv, u)) in opening.lr.iter().zip(chal_inv.iter().zip(chal.iter())) {
+                points.push(*l);
+                scalars.push(rand_base_i_c_i * u_inv);
+                points.push(*r);
+                scalars.push(rand_base_i_c_i * u);
+            }
+
+            // TERM: sum_j evalscale^j (sum_i polyscale^i f_i)(elm_j)
             combine_commitments(
                 evaluations,
-                &mut dynamic_scalars,
-                &mut dynamic_points,
+                &mut scalars,
+                &mut points,
                 *polyscale,
                 rand_base_i_c_i,
             );
 
-            dynamic_scalars.push(rand_base_i_c_i * *combined_inner_product);
-            dynamic_points.push(u_base);
-            dynamic_scalars.push(rand_base_i);
-            dynamic_points.push(opening.delta);
+            // TERM: rand_base_i * c_i * combined_inner_product * U
+            points.push(u_base);
+            scalars.push(rand_base_i_c_i * *combined_inner_product);
+
+            // TERM: rand_base_i * delta
+            points.push(opening.delta);
+            scalars.push(rand_base_i);
 
             rand_base_i *= &rand_base;
             sg_rand_base_i *= &sg_rand_base;
         }
 
-        //println!("cycle-tracker-end: ipa_build_vectors");
+        println!("cycle-tracker-end: ipa_build_vectors");
 
-        // Fixed base: only H remains
-        //println!("cycle-tracker-start: ipa_fixed_msm");
-        let fixed_res = if h_scalar.is_zero() {
-            G::Group::zero()
-        } else {
-            self.h.into_group() * h_scalar
+        // ------------------------------------------------------------------
+        // Final MSM — result must be zero for the proof to be valid
+        // ------------------------------------------------------------------
+
+        let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
+
+        println!("cycle-tracker-start: ipa_fixed_msm");
+
+        #[cfg(not(target_os = "zkvm"))]
+        let msm_res = {
+            // Non-SP1: parallel chunked MSM — optimal for large SRS on multi-core
+            let chunk_size = points.len() / 2;
+            points
+                .into_par_iter()
+                .chunks(chunk_size)
+                .zip(scalars_bigint.into_par_iter().chunks(chunk_size))
+                .map(|(bases, coeffs)| G::Group::msm_bigint(&bases, &coeffs))
+                .reduce(G::Group::zero, |mut l, r| {
+                    l += r;
+                    l
+                })
         };
-        //println!("cycle-tracker-end: ipa_fixed_msm");
 
-        // Dynamic MSM
-        //println!("cycle-tracker-start: ipa_dynamic_msm");
-        let dynamic_res = if dynamic_points.is_empty() {
-            G::Group::zero()
-        } else {
-            #[cfg(not(feature = "parallel"))]
-            {
-                let scalars_bigint: Vec<_> =
-                    dynamic_scalars.iter().map(|x| x.into_bigint()).collect();
-                G::Group::msm_bigint(&dynamic_points, &scalars_bigint)
-            }
-            #[cfg(feature = "parallel")]
-            {
-                let chunk_size = (dynamic_points.len() + 1) / 2;
-                dynamic_points
-                    .into_par_iter()
-                    .chunks(chunk_size)
-                    .zip(dynamic_scalars.into_par_iter().chunks(chunk_size))
-                    .map(|(bases, coeffs)| {
-                        let coeffs_bigint = coeffs
-                            .into_iter()
-                            .map(ark_ff::PrimeField::into_bigint)
-                            .collect::<Vec<_>>();
-                        G::Group::msm_bigint(&bases, &coeffs_bigint)
-                    })
-                    .reduce(G::Group::zero, |mut l, r| {
-                        l += r;
-                        l
-                    })
-            }
+        #[cfg(target_os = "zkvm")]
+        let msm_res = {
+            // SP1: single sequential MSM — no parallelism overhead on RISC-V
+            G::Group::msm_bigint(&points, &scalars_bigint)
         };
-        //println!("cycle-tracker-end: ipa_dynamic_msm");
 
-        let mut msm_res = fixed_res;
-        msm_res += dynamic_res;
+        println!("cycle-tracker-end: ipa_fixed_msm");
+
         msm_res == G::Group::zero()
     }
 
