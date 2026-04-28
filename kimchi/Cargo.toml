@@ -19,8 +19,8 @@ tikv-jemallocator = { workspace = true, optional = true }
 
 [dependencies]
 ark-bn254 = { workspace = true, optional = true }
-ark-ec.workspace = true
-ark-ff.workspace = true
+ark-ec= { workspace = true, features = ["debug-log"] }
+ark-ff= { workspace = true, features = ["debug-log"] }
 ark-poly.workspace = true
 ark-serialize.workspace = true
 blake2.workspace = true
@@ -96,7 +96,7 @@ ocaml_types = [
   "mina-poseidon/ocaml_types",
   "internal-tracing/ocaml_types",
 ]
-debug-log = ["mina-poseidon/debug-log"]
+debug-log = ["mina-poseidon/debug-log", "ark-ec/debug-log","ark-ff/debug-log"]
 bn254 = ["ark-bn254"]
 wasm_types = ["wasm-bindgen"]
 check_feature_flags = []

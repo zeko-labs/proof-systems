@@ -36,8 +36,8 @@ documentation = "https://o1-labs.github.io/proof-systems/rustdoc/"
 [workspace.dependencies]
 ark-algebra-test-templates = "0.5"
 ark-bn254 = { version = "0.5" }
-ark-ec = { version = "0.5", features = ["parallel"] }
-ark-ff = { version = "0.5", features = ["parallel", "asm"] }
+ark-ec = { version = "0.5", features = ["parallel", "debug-log"] }
+ark-ff = { version = "0.5", features = ["parallel", "asm", "debug-log"] }
 ark-poly = { version = "0.5", features = ["parallel"] }
 ark-serialize = "0.5"
 ark-std = { version = "0.5", features = ["parallel"] }
