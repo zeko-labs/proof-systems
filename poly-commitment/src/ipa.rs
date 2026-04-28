@@ -10,7 +10,6 @@ use crate::{
     },
     error::CommitmentError,
     hash_map_cache::HashMapCache,
-    sp1_msm,
     utils::combine_polys,
     BlindedCommitment, PolyComm, PolynomialsToCombine, SRS as SRSTrait,
 };
@@ -368,37 +367,30 @@ impl<G: CommitmentCurve> SRS<G> {
 
         println!("cycle-tracker-start: ipa_fixed_msm");
 
-        #[cfg(target_os = "zkvm")]
-        return {
-            //println!("cycle-tracker-start: ipa_fixed_msm");
-
-            // scalars sont déjà des G::ScalarField — pas besoin de into_bigint()
-            let result = sp1_msm::sp1_pallas_msm_ark(&points, &scalars);
-
-            println!("cycle-tracker-end: ipa_fixed_msm");
-            result // déjà un bool
-        };
-
         #[cfg(not(target_os = "zkvm"))]
-        return {
-            let msm_res = {
-                // chemin original
-                let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
-                let chunk_size = points.len() / 2;
-                points
-                    .into_par_iter()
-                    .chunks(chunk_size)
-                    .zip(scalars_bigint.into_par_iter().chunks(chunk_size))
-                    .map(|(bases, coeffs)| G::Group::msm_bigint(&bases, &coeffs))
-                    .reduce(G::Group::zero, |mut l, r| {
-                        l += r;
-                        l
-                    })
-            };
-
-            println!("cycle-tracker-end: ipa_fixed_msm");
-            msm_res == G::Group::zero()
+        let msm_res = {
+            // Non-SP1: parallel chunked MSM — optimal for large SRS on multi-core
+            let chunk_size = points.len() / 2;
+            points
+                .into_par_iter()
+                .chunks(chunk_size)
+                .zip(scalars_bigint.into_par_iter().chunks(chunk_size))
+                .map(|(bases, coeffs)| G::Group::msm_bigint(&bases, &coeffs))
+                .reduce(G::Group::zero, |mut l, r| {
+                    l += r;
+                    l
+                })
         };
+
+        #[cfg(target_os = "zkvm")]
+        let msm_res = {
+            // SP1: single sequential MSM — no parallelism overhead on RISC-V
+            G::Group::msm_bigint(&points, &scalars_bigint)
+        };
+
+        println!("cycle-tracker-end: ipa_fixed_msm");
+
+        msm_res == G::Group::zero()
     }
 
     /// Create a trusted-setup SRS instance for circuits with
