@@ -10,6 +10,7 @@ use crate::{
     },
     error::CommitmentError,
     hash_map_cache::HashMapCache,
+    sp1_msm,
     utils::combine_polys,
     BlindedCommitment, PolyComm, PolynomialsToCombine, SRS as SRSTrait,
 };
@@ -385,10 +386,13 @@ impl<G: CommitmentCurve> SRS<G> {
         #[cfg(target_os = "zkvm")]
         let msm_res = {
             // SP1: single sequential MSM — no parallelism overhead on RISC-V
-            G::Group::msm_bigint(&points, &scalars_bigint)
+            sp1_msm::sp1_pallas_msm_ark(&points, &scalars)
         };
 
         println!("cycle-tracker-end: ipa_fixed_msm");
+
+        #[cfg(target_os = "zkvm")]
+        return msm_res; 
 
         msm_res == G::Group::zero()
     }
