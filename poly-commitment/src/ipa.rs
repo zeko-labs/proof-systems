@@ -368,9 +368,21 @@ impl<G: CommitmentCurve> SRS<G> {
 
         println!("cycle-tracker-start: ipa_fixed_msm");
 
+        #[cfg(target_os = "zkvm")]
+        return {
+            //println!("cycle-tracker-start: ipa_fixed_msm");
+
+            // scalars sont déjà des G::ScalarField — pas besoin de into_bigint()
+            let result = sp1_msm::sp1_pallas_msm_ark(&points, &scalars);
+
+            println!("cycle-tracker-end: ipa_fixed_msm");
+            result // déjà un bool
+        };
+
         #[cfg(not(target_os = "zkvm"))]
         let msm_res = {
-            // Non-SP1: parallel chunked MSM — optimal for large SRS on multi-core
+            // chemin original
+            let scalars_bigint: Vec<_> = scalars.iter().map(|x| x.into_bigint()).collect();
             let chunk_size = points.len() / 2;
             points
                 .into_par_iter()
@@ -383,17 +395,7 @@ impl<G: CommitmentCurve> SRS<G> {
                 })
         };
 
-        #[cfg(target_os = "zkvm")]
-        let msm_res = {
-            // SP1: single sequential MSM — no parallelism overhead on RISC-V
-            sp1_msm::sp1_pallas_msm_ark(&points, &scalars)
-        };
-
         println!("cycle-tracker-end: ipa_fixed_msm");
-
-        #[cfg(target_os = "zkvm")]
-        return msm_res; 
-
         msm_res == G::Group::zero()
     }
 
